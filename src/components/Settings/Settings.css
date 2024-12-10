@@ -1,0 +1,179 @@
+.settings-container {
+  position: relative;
+  z-index: 1000;
+}
+
+.settings-button {
+  background: rgba(255, 255, 255, 0.1);
+  border: none;
+  border-radius: 50%;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #ffaf42;
+  transition: background-color 0.3s ease;
+  padding: 8px;
+}
+
+.settings-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.settings-button svg {
+  width: 24px;
+  height: 24px;
+}
+
+.settings-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  padding: 20px;
+  z-index: 9999;
+}
+
+.settings-content {
+  background: rgba(20, 23, 34, 0.98);
+  border-radius: 12px;
+  padding: 20px;
+  width: 400px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(20px);
+  margin-top: 60px;
+  margin-left: 20px;
+  z-index: 10000;
+}
+
+.settings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.settings-header h3 {
+  color: #ffaf42;
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.close-button {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 24px;
+  cursor: pointer;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  transition: background-color 0.3s ease;
+}
+
+.close-button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.service-buttons {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  margin: 20px 0;
+  position: relative;
+  z-index: 10002;
+}
+
+.service-button {
+  background: rgba(255, 255, 255, 0.08);
+  border: 2px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  min-width: 150px;
+  height: 60px;
+  position: relative;
+}
+
+.service-button:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.3);
+}
+
+.service-button.active {
+  border-color: #ffaf42;
+  background: rgba(255, 174, 66, 0.15);
+  box-shadow: 0 0 20px rgba(255, 174, 66, 0.2);
+}
+
+.service-button.other-selected {
+  opacity: 0.5;
+}
+
+.service-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.service-icon {
+  width: auto;
+  height: 40px;
+  object-fit: contain;
+}
+
+.recommended-badge {
+  position: absolute;
+  top: -10px;
+  right: -10px;
+  background: #00DC82;
+  color: #000;
+  padding: 2px 8px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-radius: 4px;
+}
+
+.lock-message {
+  margin-top: 16px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.lock-icon {
+  font-size: 1.5rem;
+}
+
+.step-container {
+  position: relative;
+  z-index: 10001;
+  background: rgba(20, 23, 34, 0.98);
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 16px;
+} 

@@ -1,9 +1,11 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import io from 'socket.io-client';
 import { saveAs } from 'file-saver';
 import './TranscriptionRoom.css';
+import AIResponse from './AIResponse';
+import Settings from './Settings/Settings';
 
-const TranscriptionRoom = ({ roomId }) => {
+const TranscriptionRoom = ({ initialService }) => {
   const [transcripts, setTranscripts] = useState([]);
   const [isRecording, setIsRecording] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
@@ -21,9 +23,20 @@ const TranscriptionRoom = ({ roomId }) => {
     timeLeft: 20
   });
   const [screenPreview, setScreenPreview] = useState(null);
-  const [selectedService, setSelectedService] = useState('');
+  const [selectedService, setSelectedService] = useState(initialService || '');
   const [currentStep, setCurrentStep] = useState('provider'); // 'provider', 'recording', 'transcribing'
   const [isProviderLocked, setIsProviderLocked] = useState(false);
+  const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
+  const videoRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [roomId, setRoomId] = useState('');
+  const [transcriptBlocks, setTranscriptBlocks] = useState([]);
+  const [currentBlock, setCurrentBlock] = useState({
+    text: '',
+    startTime: null,
+    isComplete: false
+  });
 
   const cleanupAudioContext = () => {
     try {
@@ -53,6 +66,13 @@ const TranscriptionRoom = ({ roomId }) => {
   useEffect(() => {
     socketRef.current = io('http://localhost:5002');
 
+    socketRef.current.on('connect', () => {
+      const socketId = socketRef.current.id;
+      setRoomId(socketId);
+      
+      window.history.pushState({}, '', `/${socketId}`);
+    });
+
     // Timer for countdown
     const countdownInterval = setInterval(() => {
       setCurrentSegment(prev => {
@@ -66,28 +86,61 @@ const TranscriptionRoom = ({ roomId }) => {
     socketRef.current.on('transcription', (transcription) => {
       console.log('Received transcription:', transcription);
       if (transcription.isFinal) {
-        setTranscripts(prev => {
-          const lastTranscript = prev[prev.length - 1];
-          if (lastTranscript?.text === transcription.text) {
-            return prev;
-          }
-          return [...prev, transcription];
-        });
-
-        // Update current segment
-        setCurrentSegment(prev => {
-          if (!prev.startTime) {
+        // Clean up the transcription text by removing leading "you" if it's the first word
+        const cleanedText = transcription.text.replace(/^you\s*/i, '').trim();
+        
+        // Only update if there's actual content after cleaning
+        if (cleanedText) {
+          setCurrentBlock(prev => {
+            const now = Date.now();
+            
+            // If no current block or block is complete, start a new one
+            if (!prev.startTime || prev.isComplete) {
+              return {
+                text: cleanedText,
+                startTime: now,
+                isComplete: false
+              };
+            }
+            
+            // Check if 20 seconds have passed
+            const blockAge = now - prev.startTime;
+            if (blockAge >= 20000) {
+              // Complete current block and start new one
+              setTranscriptBlocks(blocks => [...blocks, {
+                ...prev,
+                isComplete: true
+              }]);
+              
+              return {
+                text: cleanedText,
+                startTime: now,
+                isComplete: false
+              };
+            }
+            
+            // Add to current block
             return {
-              text: transcription.text,
-              startTime: Date.now(),
-              timeLeft: 20
+              ...prev,
+              text: prev.text + ' ' + cleanedText
             };
-          }
-          return {
-            ...prev,
-            text: prev.text + ' ' + transcription.text
-          };
-        });
+          });
+
+          // Update current segment for AI analysis with cleaned text
+          setCurrentSegment(prev => {
+            if (!prev.startTime) {
+              return {
+                text: cleanedText,
+                startTime: Date.now(),
+                timeLeft: 20
+              };
+            }
+            return {
+              ...prev,
+              text: prev.text + ' ' + cleanedText
+            };
+          });
+        }
       }
     });
 
@@ -122,9 +175,28 @@ const TranscriptionRoom = ({ roomId }) => {
       cleanupAudioContext();
       clearInterval(countdownInterval);
       clearInterval(analysisInterval);
-      socketRef.current.disconnect();
+      if (socketRef.current) {
+        window.history.pushState({}, '', '/');
+        socketRef.current.disconnect();
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (selectedService && socketRef.current?.id) {
+      window.history.pushState(
+        {}, 
+        '', 
+        `/${socketRef.current.id}_${selectedService}`
+      );
+    } else if (socketRef.current?.id) {
+      window.history.pushState(
+        {}, 
+        '', 
+        `/${socketRef.current.id}`
+      );
+    }
+  }, [selectedService]);
 
   const processTranscriptionWithAI = async (text) => {
     if (!text.trim()) return;
@@ -132,77 +204,19 @@ const TranscriptionRoom = ({ roomId }) => {
     socketRef.current.emit('process_with_ai', { text, roomId });
   };
 
-  const ServiceSelector = () => {
-    const handleBack = () => {
-      // Only allow going back if not in transcribing step
-      if (currentStep !== 'transcribing') {
-        setSelectedService('');
-        setCurrentStep('provider');
-      }
-    };
-
-    return (
-      <div className={`service-selector ${currentStep === 'transcribing' ? 'locked' : ''}`}>
-        <div className="background-animation"></div>
-        <button 
-          className={`back-button ${selectedService && currentStep !== 'transcribing' ? 'visible' : ''}`}
-          onClick={handleBack}
-          disabled={currentStep === 'transcribing'}
-        >
-          <svg viewBox="0 0 24 24" fill="currentColor">
-            <path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/>
-          </svg>
-          Back to selection
-        </button>
-        <div className="lock-overlay" style={{ 
-          display: currentStep === 'transcribing' ? 'flex' : 'none' 
-        }}>
-          <span className="lock-icon">🔒</span>
-          <p>Provider selection locked during transcription</p>
-        </div>
-        <h3>Step 1: Select Speech-to-Text Provider</h3>
-        <div className="service-buttons">
-          <button 
-            className={`service-button ${selectedService === 'google' ? 'active' : ''} 
-              ${selectedService === 'openai' ? 'other-selected' : ''}`}
-            onClick={() => {
-              setSelectedService('google');
-              setCurrentStep('recording');
-            }}
-            disabled={currentStep === 'transcribing'}
-          >
-            <img 
-              src="/images/gcp.png" 
-              alt="Google Cloud Platform"
-              className="service-icon"
-            />
-          </button>
-          <button 
-            className={`service-button ${selectedService === 'openai' ? 'active' : ''} 
-              ${selectedService === 'google' ? 'other-selected' : ''}`}
-            onClick={() => {
-              setSelectedService('openai');
-              setCurrentStep('recording');
-            }}
-            disabled={currentStep === 'transcribing'}
-          >
-            <img 
-              src="/images/openai.png" 
-              alt="OpenAI"
-              className="service-icon"
-            />
-          </button>
-        </div>
-      </div>
-    );
-  };
-
   const startScreenShare = async () => {
     try {
-      // Lock provider selection when starting screen share
       setIsProviderLocked(true);
       setCurrentStep('transcribing');
       
+      if (socketRef.current?.id && selectedService) {
+        window.history.pushState(
+          {}, 
+          '', 
+          `/${socketRef.current.id}_${selectedService}`
+        );
+      }
+
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { displaySurface: "browser" },
         audio: {
@@ -211,24 +225,21 @@ const TranscriptionRoom = ({ roomId }) => {
           sampleRate: 44100,
           channelCount: 1
         }
+      }).catch(error => {
+        if (error.name === 'NotAllowedError') {
+          throw new Error('Please select a tab to complete step 2');
+        }
+        throw error;
       });
 
-      const videoTrack = stream.getVideoTracks()[0];
-      if (videoTrack) {
-        const videoElement = document.createElement('video');
-        videoElement.srcObject = new MediaStream([videoTrack]);
-        videoElement.onloadedmetadata = () => {
-          videoElement.play();
-        };
-        setScreenPreview(videoElement);
-      }
+      setScreenPreview(stream);
+      screenStreamRef.current = stream;
 
       const audioTrack = stream.getAudioTracks()[0];
       if (!audioTrack) {
         throw new Error('No audio track found in screen share');
       }
 
-      screenStreamRef.current = stream;
       audioContextRef.current = new AudioContext({ sampleRate: 16000 });
       const source = audioContextRef.current.createMediaStreamSource(new MediaStream([audioTrack]));
       const processor = audioContextRef.current.createScriptProcessor(8192, 1, 1);
@@ -275,7 +286,6 @@ const TranscriptionRoom = ({ roomId }) => {
     } catch (error) {
       console.error('Error starting screen share:', error);
       alert('Error starting screen share: ' + error.message);
-      // Unlock on error
       setIsProviderLocked(false);
       setCurrentStep('recording');
     }
@@ -283,9 +293,17 @@ const TranscriptionRoom = ({ roomId }) => {
 
   const stopScreenShare = () => {
     try {
+      // Stop screen share stream
       if (screenStreamRef.current) {
         screenStreamRef.current.getTracks().forEach(track => track.stop());
         screenStreamRef.current = null;
+      }
+      
+      // Cleanup video element
+      if (videoRef.current && videoRef.current.srcObject) {
+        const tracks = videoRef.current.srcObject.getTracks();
+        tracks.forEach(track => track.stop());
+        videoRef.current.srcObject = null;
       }
       
       // Stop recording if using Google service
@@ -294,14 +312,26 @@ const TranscriptionRoom = ({ roomId }) => {
       }
       
       cleanupAudioContext();
+      
+      // Reset AI analysis state
+      setIsAiThinking(false);
+      setCurrentSegment({
+        text: '',
+        startTime: null,
+        timeLeft: 20
+      });
+      
+      // Stop transcription and AI processing
       socketRef.current.emit('stop_transcription', roomId);
+      socketRef.current.emit('stop_ai_processing', roomId);
+      
       setIsScreenSharing(false);
       setScreenPreview(null);
       
       // Reset back to step 1
       setIsProviderLocked(false);
       setCurrentStep('provider');
-      setSelectedService(''); // Clear selected service
+      setSelectedService('');
     } catch (error) {
       console.error('Error stopping screen share:', error);
     }
@@ -386,101 +416,268 @@ const TranscriptionRoom = ({ roomId }) => {
     );
   };
 
+  const aiResponsesRef = useRef(null);
+  const transcriptsRef = useRef(null);
+
+  const scrollToBottom = () => {
+    if (isAutoScrollEnabled) {
+      if (aiResponsesRef.current) {
+        aiResponsesRef.current.scrollTop = aiResponsesRef.current.scrollHeight;
+      }
+      if (transcriptsRef.current) {
+        transcriptsRef.current.scrollTop = transcriptsRef.current.scrollHeight;
+      }
+    }
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [aiResponses, transcripts]);
+
+  const toggleFullscreen = useCallback(() => {
+    if (!videoRef.current) return;
+
+    if (!document.fullscreenElement) {
+      videoRef.current.requestFullscreen().catch(err => {
+        console.error(`Error attempting to enable fullscreen: ${err.message}`);
+      });
+    } else {
+      document.exitFullscreen();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (videoRef.current) {
+      if (screenPreview) {
+        videoRef.current.srcObject = screenPreview;
+      } else {
+        // Properly cleanup video element
+        if (videoRef.current.srcObject) {
+          const tracks = videoRef.current.srcObject.getTracks();
+          tracks.forEach(track => track.stop());
+          videoRef.current.srcObject = null;
+        }
+      }
+    }
+  }, [screenPreview]);
+
+  const CopyButton = ({ text }) => {
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      } catch (err) {
+        console.error('Failed to copy text:', err);
+      }
+    };
+
+    return (
+      <button 
+        className={`copy-button ${copied ? 'copied' : ''}`} 
+        onClick={handleCopy}
+        title="Copy to clipboard"
+      >
+        {copied ? (
+          <>
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            Copied
+          </>
+        ) : (
+          <>
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            Copy
+          </>
+        )}
+      </button>
+    );
+  };
+
+  const renderTranscripts = () => {
+    if (transcriptBlocks.length === 0 && !currentBlock.text) {
+      return (
+        <div className="transcript empty">
+          <span className="text">Start recording or share your screen to begin transcription...</span>
+        </div>
+      );
+    }
+
+    return (
+      <>
+        {transcriptBlocks.map((block, index) => (
+          <div key={index} className="transcript-block">
+            <div className="content">{block.text}</div>
+            <CopyButton text={block.text} />
+          </div>
+        ))}
+        {currentBlock.text && (
+          <div className="transcript-block active">
+            <div className="content">{currentBlock.text}</div>
+          </div>
+        )}
+      </>
+    );
+  };
+
   return (
     <div className="transcription-room">
-      <h1 className="app-title">Beta version 3.0</h1>
-      <StepIndicator />
-      <div className="step-container">
-        <ServiceSelector />
-        <div className={`controls-container ${currentStep === 'provider' ? 'locked' : ''}`}>
-          <div className="lock-overlay" style={{ display: currentStep === 'provider' ? 'flex' : 'none' }}>
-            <span className="lock-icon">🔒</span>
-            <p>Please select a provider first</p>
-          </div>
-          
-          <h3>Step 2: Start Recording</h3>
-          <div className="controls">
-            <button 
-              onClick={isScreenSharing ? stopScreenShare : startScreenShare}
-              className={isScreenSharing ? 'stop-screen' : 'start-screen'}
-              disabled={currentStep === 'provider' || !selectedService}
-            >
-              {isScreenSharing ? '⏹ Stop Screen Share' : '🖥 Share Screen/Tab'}
-            </button>
-            
-            {transcripts.length > 0 && (
-              <button 
-                onClick={exportTranscript} 
-                className="export"
-                disabled={transcripts.length === 0}
-              >
-                💾 Export Transcript
-              </button>
-            )}
-          </div>
-        </div>
+      <div className="floating-element"></div>
+      <div className="floating-element"></div>
+      <div className="floating-element"></div>
+      <div className="header">
+        <Settings 
+          selectedService={selectedService}
+          setSelectedService={setSelectedService}
+          currentStep={currentStep}
+          setCurrentStep={setCurrentStep}
+          isProviderLocked={isProviderLocked}
+        />
       </div>
+      <StepIndicator />
 
       <div className="split-view">
         <div className="left-panel">
-          {screenPreview && (
-            <div className="screen-preview-container">
-              <div className="screen-preview">
-                <video 
-                  ref={node => node && (node.srcObject = screenPreview.srcObject)} 
-                  autoPlay 
-                  muted 
-                />
-              </div>
-            </div>
-          )}
-          
           <div className="transcription-panel">
             <h2>
-              Live Transcription
-              {(isRecording || isScreenSharing) && (
-                <div className="header-status">
+              <span>Live Transcription</span>
+              {(isRecording || isScreenSharing) ? (
+                <div className="header-status recording">
                   <div className="recording-dot"></div>
-                  {isRecording ? 'Recording in progress...' : 'Screen sharing in progress...'}
+                  <span>Recording...</span>
+                </div>
+              ) : (
+                <div className="header-status ready">
+                  <div className="recording-dot"></div>
+                  <span>Ready</span>
                 </div>
               )}
             </h2>
-            <div className="transcripts">
-              {transcripts.length === 0 ? (
-                <div className="transcript empty">
-                  <span className="text">Start recording or share your screen to begin transcription...</span>
+
+            <div className="controls-container">
+              <div className="lock-overlay" style={{ display: currentStep === 'provider' ? 'flex' : 'none' }}>
+                <span className="lock-icon">🔒</span>
+                <p>Please select a provider first</p>
+              </div>
+              
+              <div className="screen-preview-container">
+                <div className={`screen-preview ${isFullscreen ? 'fullscreen' : ''}`}>
+                  {screenPreview ? (
+                    <>
+                      <video 
+                        ref={videoRef}
+                        autoPlay 
+                        muted 
+                        playsInline
+                        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                      />
+                      <div className="stream-status">
+                        <div className="status-dot"></div>
+                        <span>Live</span>
+                      </div>
+                      <div className="video-controls">
+                        <div className="time-display">
+                          <span className="recording-time">
+                            {/* Add recording time display if needed */}
+                          </span>
+                        </div>
+                        <div className="floating-controls">
+                          <button 
+                            onClick={stopScreenShare}
+                            className="stop-screen"
+                          >
+                            Stop
+                          </button>
+                          <button
+                            onClick={toggleFullscreen}
+                            className="fullscreen-button"
+                          >
+                            <svg viewBox="0 0 24 24" width="16" height="16">
+                              <path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                            </svg>
+                          </button>
+                          {transcripts.length > 0 && (
+                            <button 
+                              onClick={exportTranscript} 
+                              className="export"
+                            >
+                              Export
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="preview-placeholder">
+                      <div className="preview-overlay">
+                        <div className="floating-controls">
+                          <button 
+                            onClick={startScreenShare}
+                            className="start-screen"
+                            disabled={currentStep === 'provider' || !selectedService}
+                          >
+                            Share Screen/Tab
+                          </button>
+                          {transcripts.length > 0 && (
+                            <button 
+                              onClick={exportTranscript} 
+                              className="export"
+                              disabled={transcripts.length === 0}
+                            >
+                              Export
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div className="transcript continuous">
-                  {transcripts.map((transcript, index) => (
-                    <span 
-                      key={index} 
-                      className={`sentence ${index === transcripts.length - 1 ? 'new' : ''}`}
-                    >
-                      {transcript.text}
-                    </span>
-                  ))}
-                </div>
-              )}
+              </div>
+            </div>
+
+            <div 
+              className="transcripts" 
+              ref={transcriptsRef}
+            >
+              {renderTranscripts()}
             </div>
           </div>
         </div>
 
         <div className="ai-response-panel">
-          <h2>AI Analysis</h2>
-          <div className="segment-status">
-            <div className="status-indicator">
-              <div className="progress-bar" style={{ 
-                width: `${(currentSegment.timeLeft / 20) * 100}%` 
-              }}></div>
-              {currentSegment.startTime ? (
-                <span>Collecting conversation... {currentSegment.timeLeft}s until analysis</span>
-              ) : (
-                <span>Waiting for conversation to begin...</span>
-              )}
+          <div className="panel-header">
+            <h2>AI Analysis</h2>
+            <div className="segment-status">
+              <div className="status-indicator">
+                <div className="progress-bar" style={{ 
+                  width: `${(currentSegment.timeLeft / 20) * 100}%` 
+                }}></div>
+                {currentSegment.startTime ? (
+                  <span>Collecting conversation... {currentSegment.timeLeft}s until analysis</span>
+                ) : (
+                  <span>Waiting for conversation to begin...</span>
+                )}
+              </div>
+            </div>
+            <div className="auto-scroll-toggle">
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={isAutoScrollEnabled}
+                  onChange={(e) => setIsAutoScrollEnabled(e.target.checked)}
+                />
+                <span className="toggle-slider"></span>
+              </label>
+              <span className="toggle-label">Auto Scroll</span>
             </div>
           </div>
-          <div className="ai-responses">
+          <div className="ai-responses" ref={aiResponsesRef}>
             {aiResponses.length === 0 ? (
               <div className="ai-response">
                 <span className="text">
@@ -489,22 +686,10 @@ const TranscriptionRoom = ({ roomId }) => {
               </div>
             ) : (
               aiResponses.map((response, index) => (
-                <div 
+                <AIResponse 
                   key={index} 
-                  className={`ai-response ${response.isError ? 'error' : ''} ${response.isMock ? 'mock' : ''}`}
-                >
-                  {response.context && (
-                    <div className="context">
-                      <div className="context-label">Analyzed Conversation:</div>
-                      <div className="context-text">{response.context}</div>
-                    </div>
-                  )}
-                  <div className="analysis">
-                    <div className="analysis-label">AI Analysis:</div>
-                    <div className="analysis-text">{response.text}</div>
-                  </div>
-                  {response.isMock && <span className="mock-indicator">Demo Mode</span>}
-                </div>
+                  text={response.text}
+                />
               ))
             )}
             {isAiThinking && (
