@@ -37,6 +37,8 @@ const TranscriptionRoom = ({ initialService }) => {
     startTime: null,
     isComplete: false
   });
+  const [isAiAnalysisEnabled, setIsAiAnalysisEnabled] = useState(true);
+  const [isAiToggleLocked, setIsAiToggleLocked] = useState(false);
 
   const cleanupAudioContext = () => {
     try {
@@ -75,12 +77,14 @@ const TranscriptionRoom = ({ initialService }) => {
 
     // Timer for countdown
     const countdownInterval = setInterval(() => {
-      setCurrentSegment(prev => {
-        if (!prev.startTime) return prev;
-        const elapsed = (Date.now() - prev.startTime) / 1000;
-        const timeLeft = Math.max(0, 20 - Math.floor(elapsed));
-        return { ...prev, timeLeft };
-      });
+      if (isAiAnalysisEnabled) {
+        setCurrentSegment(prev => {
+          if (!prev.startTime) return prev;
+          const elapsed = (Date.now() - prev.startTime) / 1000;
+          const timeLeft = Math.max(0, 20 - Math.floor(elapsed));
+          return { ...prev, timeLeft };
+        });
+      }
     }, 1000);
 
     socketRef.current.on('transcription', (transcription) => {
@@ -126,20 +130,22 @@ const TranscriptionRoom = ({ initialService }) => {
             };
           });
 
-          // Update current segment for AI analysis with cleaned text
-          setCurrentSegment(prev => {
-            if (!prev.startTime) {
+          // Only update current segment if AI analysis is enabled
+          if (isAiAnalysisEnabled) {
+            setCurrentSegment(prev => {
+              if (!prev.startTime) {
+                return {
+                  text: cleanedText,
+                  startTime: Date.now(),
+                  timeLeft: 20
+                };
+              }
               return {
-                text: cleanedText,
-                startTime: Date.now(),
-                timeLeft: 20
+                ...prev,
+                text: prev.text + ' ' + cleanedText
               };
-            }
-            return {
-              ...prev,
-              text: prev.text + ' ' + cleanedText
-            };
-          });
+            });
+          }
         }
       }
     });
@@ -152,13 +158,15 @@ const TranscriptionRoom = ({ initialService }) => {
 
     // Set up interval for processing accumulated transcripts
     const analysisInterval = setInterval(() => {
-      setCurrentSegment(prev => {
-        if (prev.text.trim()) {
-          processTranscriptionWithAI(prev.text);
-          return { text: '', startTime: null, timeLeft: 20 };
-        }
-        return prev;
-      });
+      if (isAiAnalysisEnabled) {
+        setCurrentSegment(prev => {
+          if (prev.text.trim()) {
+            processTranscriptionWithAI(prev.text);
+            return { text: '', startTime: null, timeLeft: 20 };
+          }
+          return prev;
+        });
+      }
     }, ANALYSIS_INTERVAL);
 
     socketRef.current.on('ai_response', (response) => {
@@ -180,7 +188,7 @@ const TranscriptionRoom = ({ initialService }) => {
         socketRef.current.disconnect();
       }
     };
-  }, []);
+  }, [isAiAnalysisEnabled]);
 
   useEffect(() => {
     if (selectedService && socketRef.current?.id) {
@@ -199,7 +207,7 @@ const TranscriptionRoom = ({ initialService }) => {
   }, [selectedService]);
 
   const processTranscriptionWithAI = async (text) => {
-    if (!text.trim()) return;
+    if (!text.trim() || !isAiAnalysisEnabled) return;
     setIsAiThinking(true);
     socketRef.current.emit('process_with_ai', { text, roomId });
   };
@@ -208,6 +216,7 @@ const TranscriptionRoom = ({ initialService }) => {
     try {
       setIsProviderLocked(true);
       setCurrentStep('transcribing');
+      setIsAiToggleLocked(true);
       
       if (socketRef.current?.id && selectedService) {
         window.history.pushState(
@@ -288,6 +297,7 @@ const TranscriptionRoom = ({ initialService }) => {
       alert('Error starting screen share: ' + error.message);
       setIsProviderLocked(false);
       setCurrentStep('recording');
+      setIsAiToggleLocked(false);
     }
   };
 
@@ -332,8 +342,10 @@ const TranscriptionRoom = ({ initialService }) => {
       setIsProviderLocked(false);
       setCurrentStep('provider');
       setSelectedService('');
+      setIsAiToggleLocked(false);
     } catch (error) {
       console.error('Error stopping screen share:', error);
+      setIsAiToggleLocked(false);
     }
   };
 
@@ -421,18 +433,27 @@ const TranscriptionRoom = ({ initialService }) => {
 
   const scrollToBottom = () => {
     if (isAutoScrollEnabled) {
-      if (aiResponsesRef.current) {
-        aiResponsesRef.current.scrollTop = aiResponsesRef.current.scrollHeight;
-      }
+      // Always scroll transcripts if auto-scroll is enabled
       if (transcriptsRef.current) {
         transcriptsRef.current.scrollTop = transcriptsRef.current.scrollHeight;
+      }
+      
+      // Only scroll AI responses if AI analysis is enabled
+      if (isAiAnalysisEnabled && aiResponsesRef.current) {
+        aiResponsesRef.current.scrollTop = aiResponsesRef.current.scrollHeight;
       }
     }
   };
 
   useEffect(() => {
     scrollToBottom();
-  }, [aiResponses, transcripts]);
+  }, [currentBlock, transcriptBlocks]); // Watch for transcript changes
+
+  useEffect(() => {
+    if (isAiAnalysisEnabled) {
+      scrollToBottom();
+    }
+  }, [aiResponses]);
 
   const toggleFullscreen = useCallback(() => {
     if (!videoRef.current) return;
@@ -526,6 +547,48 @@ const TranscriptionRoom = ({ initialService }) => {
     );
   };
 
+  const handleAiAnalysisToggle = () => {
+    if (isAiToggleLocked) {
+      return;
+    }
+    
+    setIsAiAnalysisEnabled(!isAiAnalysisEnabled);
+    if (!isAiAnalysisEnabled) {
+      setIsAiThinking(false);
+      setCurrentSegment({
+        text: '',
+        startTime: null,
+        timeLeft: 20
+      });
+    } else {
+      if (socketRef.current) {
+        socketRef.current.emit('stop_ai_processing', roomId);
+      }
+    }
+  };
+
+  const handleAutoScrollToggle = (enabled) => {
+    setIsAutoScrollEnabled(enabled);
+    if (enabled) {
+      // Scroll to bottom immediately when enabling
+      scrollToBottom();
+    }
+  };
+
+  const BackToDefaultButton = ({ onClick }) => (
+    <button 
+      className="back-to-default-button"
+      onClick={onClick}
+      title="Switch back to split view mode"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M4 21V8.49999L12 3L20 8.49999V21H4Z"/>
+        <path d="M15 21V15H9V21"/>
+      </svg>
+      Back to Default View
+    </button>
+  );
+
   return (
     <div className="transcription-room">
       <div className="floating-element"></div>
@@ -542,164 +605,197 @@ const TranscriptionRoom = ({ initialService }) => {
       </div>
       <StepIndicator />
 
-      <div className="split-view">
+      <div className={`split-view ${!isAiAnalysisEnabled ? 'single-panel' : ''}`}>
         <div className="left-panel">
           <div className="transcription-panel">
-            <h2>
-              <span>Live Transcription</span>
-              {(isRecording || isScreenSharing) ? (
-                <div className="header-status recording">
-                  <div className="recording-dot"></div>
-                  <span>Recording...</span>
+            <div className="transcription-panel-content">
+              <h2>
+                <span>Live Transcription</span>
+                {(isRecording || isScreenSharing) ? (
+                  <div className="header-status recording">
+                    <div className="recording-dot"></div>
+                    <span>Recording...</span>
+                  </div>
+                ) : (
+                  <div className="header-status ready">
+                    <div className="recording-dot"></div>
+                    <span>Ready</span>
+                  </div>
+                )}
+              </h2>
+
+              <div className="controls-container">
+                <div className="lock-overlay" style={{ display: currentStep === 'provider' ? 'flex' : 'none' }}>
+                  <span className="lock-icon">🔒</span>
+                  <p>Please select a provider first</p>
                 </div>
-              ) : (
-                <div className="header-status ready">
-                  <div className="recording-dot"></div>
-                  <span>Ready</span>
+                
+                <div className="screen-preview-container">
+                  <div className={`screen-preview ${isFullscreen ? 'fullscreen' : ''}`}>
+                    {screenPreview ? (
+                      <>
+                        <video 
+                          ref={videoRef}
+                          autoPlay 
+                          muted 
+                          playsInline
+                          style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                        />
+                        <div className="stream-status">
+                          <div className="status-dot"></div>
+                          <span>Live</span>
+                        </div>
+                        <div className="video-controls">
+                          <div className="time-display">
+                            <span className="recording-time">
+                              {/* Add recording time display if needed */}
+                            </span>
+                          </div>
+                          <div className="floating-controls">
+                            <button 
+                              onClick={stopScreenShare}
+                              className="stop-screen"
+                            >
+                              Stop
+                            </button>
+                            <button
+                              onClick={toggleFullscreen}
+                              className="fullscreen-button"
+                            >
+                              <svg viewBox="0 0 24 24" width="16" height="16">
+                                <path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+                              </svg>
+                            </button>
+                            {transcripts.length > 0 && (
+                              <button 
+                                onClick={exportTranscript} 
+                                className="export"
+                              >
+                                Export
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="preview-placeholder">
+                        <div className="preview-overlay">
+                          <div className="floating-controls">
+                            <button 
+                              onClick={startScreenShare}
+                              className="start-screen"
+                              disabled={currentStep === 'provider' || !selectedService}
+                            >
+                              Share Screen/Tab
+                            </button>
+                            {transcripts.length > 0 && (
+                              <button 
+                                onClick={exportTranscript} 
+                                className="export"
+                                disabled={transcripts.length === 0}
+                              >
+                                Export
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div 
+                className="transcripts" 
+                ref={transcriptsRef}
+              >
+                {renderTranscripts()}
+              </div>
+
+              {!isAiAnalysisEnabled && (
+                <div className="single-panel-footer">
+                  <BackToDefaultButton onClick={() => setIsAiAnalysisEnabled(true)} />
                 </div>
               )}
-            </h2>
+            </div>
+          </div>
+        </div>
 
-            <div className="controls-container">
-              <div className="lock-overlay" style={{ display: currentStep === 'provider' ? 'flex' : 'none' }}>
-                <span className="lock-icon">🔒</span>
-                <p>Please select a provider first</p>
-              </div>
-              
-              <div className="screen-preview-container">
-                <div className={`screen-preview ${isFullscreen ? 'fullscreen' : ''}`}>
-                  {screenPreview ? (
-                    <>
-                      <video 
-                        ref={videoRef}
-                        autoPlay 
-                        muted 
-                        playsInline
-                        style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                      />
-                      <div className="stream-status">
-                        <div className="status-dot"></div>
-                        <span>Live</span>
-                      </div>
-                      <div className="video-controls">
-                        <div className="time-display">
-                          <span className="recording-time">
-                            {/* Add recording time display if needed */}
-                          </span>
-                        </div>
-                        <div className="floating-controls">
-                          <button 
-                            onClick={stopScreenShare}
-                            className="stop-screen"
-                          >
-                            Stop
-                          </button>
-                          <button
-                            onClick={toggleFullscreen}
-                            className="fullscreen-button"
-                          >
-                            <svg viewBox="0 0 24 24" width="16" height="16">
-                              <path fill="currentColor" d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
-                            </svg>
-                          </button>
-                          {transcripts.length > 0 && (
-                            <button 
-                              onClick={exportTranscript} 
-                              className="export"
-                            >
-                              Export
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="preview-placeholder">
-                      <div className="preview-overlay">
-                        <div className="floating-controls">
-                          <button 
-                            onClick={startScreenShare}
-                            className="start-screen"
-                            disabled={currentStep === 'provider' || !selectedService}
-                          >
-                            Share Screen/Tab
-                          </button>
-                          {transcripts.length > 0 && (
-                            <button 
-                              onClick={exportTranscript} 
-                              className="export"
-                              disabled={transcripts.length === 0}
-                            >
-                              Export
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
+        {isAiAnalysisEnabled && (
+          <div className="ai-response-panel">
+            <div className="panel-header">
+              <h2>AI Analysis</h2>
+              <div className="ai-controls">
+                <div className="toggle-switch-container">
+                  <label className={`toggle-switch ${isAiToggleLocked ? 'locked' : ''}`}>
+                    <input
+                      type="checkbox"
+                      checked={isAiAnalysisEnabled}
+                      onChange={handleAiAnalysisToggle}
+                      disabled={isAiToggleLocked}
+                    />
+                    <span className="toggle-slider"></span>
+                  </label>
+                  <span className="toggle-label">
+                    AI Analysis {isAiAnalysisEnabled ? 'ON' : 'OFF'}
+                    {isAiToggleLocked && (
+                      <span className="lock-indicator" title="Cannot change during live transcription">
+                        🔒
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div className="auto-scroll-toggle">
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={isAutoScrollEnabled}
+                      onChange={(e) => handleAutoScrollToggle(e.target.checked)}
+                    />
+                    <span className="toggle-slider"></span>
+                  </label>
+                  <span className="toggle-label">Auto Scroll</span>
                 </div>
               </div>
+              {isAiAnalysisEnabled && (
+                <div className="segment-status">
+                  <div className="status-indicator">
+                    <div className="progress-bar" style={{ 
+                      width: `${(currentSegment.timeLeft / 20) * 100}%` 
+                    }}></div>
+                    {currentSegment.startTime ? (
+                      <span>Collecting conversation... {currentSegment.timeLeft}s until analysis</span>
+                    ) : (
+                      <span>Waiting for conversation to begin...</span>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
-
-            <div 
-              className="transcripts" 
-              ref={transcriptsRef}
-            >
-              {renderTranscripts()}
+            <div className="ai-responses" ref={aiResponsesRef}>
+              {aiResponses.length === 0 ? (
+                <div className="ai-response">
+                  <span className="text">
+                    Collecting conversation context... Analysis will appear every 20 seconds.
+                  </span>
+                </div>
+              ) : (
+                aiResponses.map((response, index) => (
+                  <AIResponse 
+                    key={index} 
+                    text={response.text}
+                  />
+                ))
+              )}
+              {isAiThinking && (
+                <div className="ai-thinking">
+                  <div className="thinking-dots"></div>
+                  Analyzing recent conversation...
+                </div>
+              )}
             </div>
           </div>
-        </div>
-
-        <div className="ai-response-panel">
-          <div className="panel-header">
-            <h2>AI Analysis</h2>
-            <div className="segment-status">
-              <div className="status-indicator">
-                <div className="progress-bar" style={{ 
-                  width: `${(currentSegment.timeLeft / 20) * 100}%` 
-                }}></div>
-                {currentSegment.startTime ? (
-                  <span>Collecting conversation... {currentSegment.timeLeft}s until analysis</span>
-                ) : (
-                  <span>Waiting for conversation to begin...</span>
-                )}
-              </div>
-            </div>
-            <div className="auto-scroll-toggle">
-              <label className="toggle-switch">
-                <input
-                  type="checkbox"
-                  checked={isAutoScrollEnabled}
-                  onChange={(e) => setIsAutoScrollEnabled(e.target.checked)}
-                />
-                <span className="toggle-slider"></span>
-              </label>
-              <span className="toggle-label">Auto Scroll</span>
-            </div>
-          </div>
-          <div className="ai-responses" ref={aiResponsesRef}>
-            {aiResponses.length === 0 ? (
-              <div className="ai-response">
-                <span className="text">
-                  Collecting conversation context... Analysis will appear every 20 seconds.
-                </span>
-              </div>
-            ) : (
-              aiResponses.map((response, index) => (
-                <AIResponse 
-                  key={index} 
-                  text={response.text}
-                />
-              ))
-            )}
-            {isAiThinking && (
-              <div className="ai-thinking">
-                <div className="thinking-dots"></div>
-                Analyzing recent conversation...
-              </div>
-            )}
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );

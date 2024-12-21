@@ -307,3 +307,717 @@
   justify-content: center;
   background: rgba(0, 0, 0, 0.6);
 }
+
+/* AI Controls */
+.ai-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 8px 0;
+}
+
+.toggle-switch-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 22px;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(255, 255, 255, 0.1);
+  transition: .4s;
+  border-radius: 22px;
+  border: 1px solid var(--border-light);
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background-color: var(--text-primary);
+  transition: .4s;
+  border-radius: 50%;
+}
+
+input:checked + .toggle-slider {
+  background-color: var(--accent-primary);
+}
+
+input:checked + .toggle-slider:before {
+  transform: translateX(22px);
+}
+
+.toggle-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  user-select: none;
+}
+
+/* Update panel header for new controls */
+.panel-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-light);
+  background: rgba(0, 209, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-header h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+/* Add styles for locked toggle state */
+.toggle-switch.locked {
+  opacity: 0.8;
+  cursor: not-allowed;
+}
+
+.toggle-switch.locked input {
+  cursor: not-allowed;
+}
+
+.toggle-switch.locked .toggle-slider {
+  cursor: not-allowed;
+  background-color: var(--border-light);
+}
+
+.lock-indicator {
+  margin-left: 6px;
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+/* Add tooltip styles */
+.toggle-switch.locked::after {
+  content: "Cannot change during live transcription";
+  position: absolute;
+  bottom: -30px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+}
+
+.toggle-switch.locked:hover::after {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Update split view styles */
+.split-view {
+  display: grid;
+  grid-template-columns: 0.35fr 1.65fr;
+  gap: 20px;
+  height: calc(100vh - 140px);
+  padding: 0 20px;
+  transition: all 0.3s ease;
+  overflow: hidden;
+}
+
+/* Improved single panel mode */
+.split-view.single-panel {
+  grid-template-columns: 1fr;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 0 20px;
+  height: calc(100vh - 140px);
+  position: relative;
+}
+
+.split-view.single-panel .left-panel {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.split-view.single-panel .transcription-panel {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 15px;
+  background: var(--panel-bg);
+  border-radius: 12px;
+  position: relative;
+  z-index: 0;
+  overflow: hidden;
+}
+
+/* Border animation effect */
+.split-view.single-panel .transcription-panel::before,
+.split-view.single-panel .transcription-panel::after {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  width: calc(100% + 4px);
+  height: calc(100% + 4px);
+  background: linear-gradient(
+    45deg,
+    var(--accent-primary),
+    var(--accent-secondary),
+    rgba(0, 209, 255, 0.2),
+    var(--accent-primary)
+  );
+  z-index: -1;
+  border-radius: 12px;
+  opacity: 0.3;
+}
+
+.split-view.single-panel .transcription-panel::after {
+  background: var(--panel-bg);
+  margin: 1px;
+  border-radius: 11px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  opacity: 1;
+}
+
+/* Inner content wrapper to handle overflow */
+.split-view.single-panel .transcription-panel-content {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 11px;
+}
+
+/* Screen preview and controls container adjustments */
+.split-view.single-panel .controls-container {
+  width: 100%;
+  max-width: 300px;
+  margin: 0 auto 15px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.split-view.single-panel .screen-preview-container {
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+  height: 180px;
+  min-height: 140px;
+  max-height: 180px;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Preview placeholder for single panel */
+.split-view.single-panel .preview-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 8px;
+}
+
+/* Preview overlay for single panel */
+.split-view.single-panel .preview-overlay {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 8px;
+}
+
+/* Floating controls for single panel */
+.split-view.single-panel .floating-controls {
+  display: flex;
+  gap: 12px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.split-view.single-panel .floating-controls button {
+  background: var(--accent-primary);
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  height: 36px;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.split-view.single-panel .floating-controls button:hover {
+  background: var(--accent-secondary);
+  transform: translateY(-1px);
+}
+
+.split-view.single-panel .floating-controls .start-screen {
+  background: linear-gradient(45deg, var(--accent-primary), var(--accent-secondary));
+  min-width: 160px;
+}
+
+.split-view.single-panel .floating-controls .export {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* Lock overlay for single panel */
+.split-view.single-panel .lock-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border-radius: 8px;
+  backdrop-filter: blur(4px);
+}
+
+.split-view.single-panel .lock-overlay .lock-icon {
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+
+.split-view.single-panel .lock-overlay p {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin: 0;
+}
+
+/* Responsive adjustments for controls */
+@media (max-width: 1440px) {
+  .split-view.single-panel .controls-container {
+    max-width: 1100px;
+    padding: 15px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .split-view.single-panel .controls-container {
+    padding: 12px;
+  }
+  
+  .split-view.single-panel .floating-controls button {
+    padding: 6px 14px;
+    font-size: 13px;
+    height: 32px;
+  }
+}
+
+@media (max-width: 768px) {
+  .split-view.single-panel .controls-container {
+    padding: 10px;
+  }
+  
+  .split-view.single-panel .floating-controls {
+    padding: 8px;
+    gap: 8px;
+  }
+  
+  .split-view.single-panel .floating-controls button {
+    padding: 6px 12px;
+    font-size: 12px;
+    height: 30px;
+  }
+  
+  .split-view.single-panel .floating-controls .start-screen {
+    min-width: 140px;
+  }
+}
+
+/* Transcripts container adjustments with unique design */
+.split-view.single-panel .transcripts {
+  flex: 1;
+  width: 100%;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 12px;
+  position: relative;
+  box-shadow: 
+    inset 0 2px 10px rgba(0, 0, 0, 0.2),
+    0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* Animated border effect */
+.split-view.single-panel .transcripts::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: -1px;
+  right: -1px;
+  bottom: -1px;
+  border-radius: 12px;
+  z-index: -1;
+  opacity: 0.3;
+}
+
+/* Transcript blocks with updated styling */
+.split-view.single-panel .transcript-block {
+  position: relative;
+  background: rgba(20, 30, 70, 0.4);
+  border-radius: 8px;
+  padding: 16px;
+  margin: 12px auto;
+  max-width: 1100px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(8px);
+}
+
+.split-view.single-panel .transcript-block:hover {
+  background: rgba(20, 30, 70, 0.5);
+}
+
+/* Active block with unique styling */
+.split-view.single-panel .transcript-block.active {
+  background: rgba(0, 209, 255, 0.05);
+  border-left: 3px solid var(--accent-primary);
+  box-shadow: 
+    inset 0 0 20px rgba(0, 209, 255, 0.05),
+    0 0 10px rgba(0, 209, 255, 0.1);
+}
+
+/* Scrollbar styling update */
+.split-view.single-panel .transcripts::-webkit-scrollbar {
+  width: 6px;
+}
+
+.split-view.single-panel .transcripts::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.split-view.single-panel .transcripts::-webkit-scrollbar-thumb {
+  background: linear-gradient(
+    var(--accent-primary),
+    var(--accent-secondary)
+  );
+  border-radius: 3px;
+}
+
+.split-view.single-panel .transcripts::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(
+    var(--accent-secondary),
+    var(--accent-primary)
+  );
+}
+
+/* Empty state with matching design */
+.split-view.single-panel .transcript.empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 15px;
+  background: rgba(20, 30, 70, 0.3);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 40px;
+  backdrop-filter: blur(8px);
+}
+
+/* Responsive adjustments */
+@media (max-width: 1440px) {
+  .split-view.single-panel .transcripts {
+    max-width: 1100px;
+    padding: 16px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .split-view.single-panel .transcripts {
+    padding: 14px;
+  }
+  
+  .split-view.single-panel .transcript-block {
+    padding: 14px;
+    margin: 10px auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .split-view.single-panel .transcripts {
+    padding: 12px;
+  }
+  
+  .split-view.single-panel .transcript-block {
+    padding: 12px;
+    margin: 8px auto;
+  }
+}
+
+/* Header adjustments */
+.split-view.single-panel .transcription-panel h2 {
+  padding: 10px 0;
+  margin-bottom: 15px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Ensure smooth transitions */
+.split-view.single-panel * {
+  transition: all 0.3s ease;
+}
+
+/* Responsive adjustments */
+@media (max-width: 1440px) {
+  .split-view.single-panel .transcription-panel {
+    max-width: 1200px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .split-view.single-panel .transcription-panel {
+    padding: 12px;
+  }
+}
+
+@media (max-width: 768px) {
+  .split-view.single-panel .transcription-panel {
+    padding: 10px;
+  }
+}
+
+/* Base room styling */
+.transcription-room {
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+  z-index: 0;
+  background: var(--bg-gradient-start);
+}
+
+/* Dynamic background effect */
+.transcription-room::before {
+  content: '';
+  position: fixed;
+  top: -50%;
+  left: -50%;
+  width: 200%;
+  height: 200%;
+  background: radial-gradient(
+    circle at center,
+    transparent 0%,
+    var(--bg-gradient-start) 46%,
+    var(--bg-gradient-end) 100%
+  );
+  background-size: 200% 200%;
+  animation: moveGradient 25s ease infinite;
+  opacity: 0.8;
+  z-index: -1;
+}
+
+/* Floating elements for depth */
+.floating-element {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.15;
+  z-index: -1;
+}
+
+.floating-element:nth-child(1) {
+  background: var(--accent-primary);
+  width: 300px;
+  height: 300px;
+  top: -100px;
+  left: -100px;
+  animation: float1 15s ease-in-out infinite;
+}
+
+.floating-element:nth-child(2) {
+  background: var(--accent-secondary);
+  width: 400px;
+  height: 400px;
+  top: 40%;
+  right: -200px;
+  animation: float2 20s ease-in-out infinite;
+}
+
+.floating-element:nth-child(3) {
+  background: var(--accent-success);
+  width: 350px;
+  height: 350px;
+  bottom: -150px;
+  left: 30%;
+  animation: float3 18s ease-in-out infinite;
+}
+
+/* Background animations */
+@keyframes moveGradient {
+  0% {
+    transform: rotate(0deg);
+  }
+  50% {
+    transform: rotate(180deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes float1 {
+  0%, 100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(50px, 50px);
+  }
+}
+
+@keyframes float2 {
+  0%, 100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(-60px, -30px);
+  }
+}
+
+@keyframes float3 {
+  0%, 100% {
+    transform: translate(0, 0);
+  }
+  50% {
+    transform: translate(40px, -40px);
+  }
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .floating-element {
+    filter: blur(60px);
+  }
+  
+  .floating-element:nth-child(1) {
+    width: 200px;
+    height: 200px;
+  }
+  
+  .floating-element:nth-child(2) {
+    width: 300px;
+    height: 300px;
+  }
+  
+  .floating-element:nth-child(3) {
+    width: 250px;
+    height: 250px;
+  }
+}
+
+/* Single panel footer */
+.single-panel-footer {
+  position: relative;
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+  margin-top: auto;
+  background: linear-gradient(
+    to top,
+    rgba(10, 17, 40, 0.95) 20%,
+    rgba(10, 17, 40, 0)
+  );
+  border-radius: 0 0 12px 12px;
+  margin: 0 -15px -15px -15px;
+}
+
+/* Back to default button */
+.back-to-default-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+
+.back-to-default-button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Update transcription panel content to accommodate footer */
+.split-view.single-panel .transcription-panel-content {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Adjust transcripts container to account for footer */
+.split-view.single-panel .transcripts {
+  flex: 1;
+  margin-bottom: 0;
+  max-height: calc(100% - 60px);
+}
+
+/* Remove previous padding-bottom adjustment */
+.split-view.single-panel {
+  padding-bottom: 0;
+}
+
+@media (max-width: 768px) {
+  .single-panel-footer {
+    padding: 12px;
+  }
+
+  .back-to-default-button {
+    padding: 6px 14px;
+    font-size: 12px;
+  }
+}
