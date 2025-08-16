@@ -159,17 +159,13 @@ function Settings({
                   <CardDescription className="mb-6">
                     Choose your preferred speech-to-text service
                   </CardDescription>
-                  <div className="grid grid-cols-2 gap-4">
+                  <div className="grid grid-cols-3 gap-4">
                     <button
                       className={`
                         relative p-6 rounded-lg border-2 transition-all
-                        ${selectedService === 'google' 
-                          ? 'border-primary bg-primary/10' 
-                          : 'border-border hover:border-primary/50'}
-                        ${currentStep === 'transcribing' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                        border-border opacity-60 cursor-not-allowed
                       `}
-                      onClick={() => handleServiceSelect('google')}
-                      disabled={currentStep === 'transcribing'}
+                      disabled
                     >
                       <img 
                         src="/images/gcp.png" 
@@ -178,24 +174,17 @@ function Settings({
                       />
                       <p className="text-sm font-medium">Google Cloud</p>
                       <p className="text-xs text-muted-foreground mt-1">
-                        Real-time streaming • Speaker detection
+                        Unavailable
                       </p>
                     </button>
 
                     <button
                       className={`
                         relative p-6 rounded-lg border-2 transition-all
-                        ${selectedService === 'openai' 
-                          ? 'border-primary bg-primary/10' 
-                          : 'border-border hover:border-primary/50'}
-                        ${currentStep === 'transcribing' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                        border-border opacity-60 cursor-not-allowed
                       `}
-                      onClick={() => handleServiceSelect('openai')}
-                      disabled={currentStep === 'transcribing'}
+                      disabled
                     >
-                      <Badge className="absolute top-2 right-2" variant="default">
-                        Recommended
-                      </Badge>
                       <img 
                         src="/images/openai.png" 
                         alt="OpenAI"
@@ -203,7 +192,30 @@ function Settings({
                       />
                       <p className="text-sm font-medium">OpenAI Whisper</p>
                       <p className="text-xs text-muted-foreground mt-1">
-                        High accuracy • Better with accents
+                        Unavailable
+                      </p>
+                    </button>
+
+                    <button
+                      className={`
+                        relative p-6 rounded-lg border-2 transition-all
+                        ${selectedService === 'deepgram' 
+                          ? 'border-primary bg-primary/10' 
+                          : 'border-border hover:border-primary/50'}
+                        ${currentStep === 'transcribing' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                      `}
+                      onClick={() => handleServiceSelect('deepgram')}
+                      disabled={currentStep === 'transcribing'}
+                    >
+                      <Badge className="absolute top-2 right-2" variant="secondary">Available</Badge>
+                      <img 
+                        src="/images/deepgram.png" 
+                        alt="Deepgram"
+                        className="w-full h-20 object-contain mb-2"
+                      />
+                      <p className="text-sm font-medium">Deepgram</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Low latency • High accuracy • Diarization
                       </p>
                     </button>
                   </div>

@@ -1,26 +1,27 @@
 class AudioProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.bufferSize = 2048;
+    this.bufferSize = 8192;
     this.buffer = new Float32Array(this.bufferSize);
     this.bufferIndex = 0;
   }
 
   process(inputs, outputs, parameters) {
     const input = inputs[0];
-    if (!input || !input[0]) return true;
+    const channel = input[0];
 
-    const inputData = input[0];
-    
-    // Fill buffer with input data
-    for (let i = 0; i < inputData.length; i++) {
-      this.buffer[this.bufferIndex] = inputData[i];
-      this.bufferIndex++;
+    if (!channel) return true;
+
+    // Fill buffer
+    for (let i = 0; i < channel.length; i++) {
+      this.buffer[this.bufferIndex++] = channel[i];
 
       // When buffer is full, send it to the main thread
       if (this.bufferIndex >= this.bufferSize) {
-        const audioData = new Float32Array(this.buffer);
-        this.port.postMessage({ audioData });
+        this.port.postMessage({
+          audioData: this.buffer.buffer
+        });
+        this.buffer = new Float32Array(this.bufferSize);
         this.bufferIndex = 0;
       }
     }
@@ -29,4 +30,4 @@ class AudioProcessor extends AudioWorkletProcessor {
   }
 }
 
-registerProcessor('audio-processor', AudioProcessor); 
+registerProcessor('audio-processor', AudioProcessor);

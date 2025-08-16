@@ -48,11 +48,27 @@ const TranscriptionRoom = ({ initialService }) => {
   const [transcriptBlocks, setTranscriptBlocks] = useState([]);
   const [currentBlock, setCurrentBlock] = useState({
     text: '',
+    interim: '',
     startTime: null,
     isComplete: false
   });
   const [selectedAgent, setSelectedAgent] = useState('MEETING_ANALYST');
   const [roomContext, setRoomContext] = useState(null);
+  const [historyIdx, setHistoryIdx] = useState(null);
+  const [historyStage, setHistoryStage] = useState('idle'); // 'new' | 'warn' | 'idle'
+  const [historyCopied, setHistoryCopied] = useState(false);
+  const [debugMode, setDebugMode] = useState(false);
+  const [isOverlayVisible, setIsOverlayVisible] = useState(true);
+
+  // Helper for a clean overlay caption (recent snippet only)
+  const getOverlayText = useCallback(() => {
+    const base = `${currentBlock.text ? currentBlock.text + ' ' : ''}${currentBlock.interim || ''}`
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!base) return '';
+    const LIMIT = 220; // characters
+    return base.length > LIMIT ? `… ${base.slice(-LIMIT)}` : base;
+  }, [currentBlock.text, currentBlock.interim]);
 
   const cleanupAudioContext = () => {
     try {
@@ -80,6 +96,22 @@ const TranscriptionRoom = ({ initialService }) => {
   };
 
   useEffect(() => {
+    // Enable debug via ?debug=1 or localStorage('debug_mode')
+    const params = new URLSearchParams(window.location.search);
+    const dbg = params.get('debug') === '1' || localStorage.getItem('debug_mode') === '1';
+    setDebugMode(dbg);
+    if (dbg) {
+      const saved = localStorage.getItem('overlay_visible');
+      if (saved !== null) setIsOverlayVisible(saved === '1');
+      const handler = (e) => {
+        if (e.key.toLowerCase() === 'o') {
+          setIsOverlayVisible(v => { const nv = !v; localStorage.setItem('overlay_visible', nv ? '1' : '0'); return nv; });
+        }
+      };
+      window.addEventListener('keydown', handler);
+      return () => window.removeEventListener('keydown', handler);
+    }
+
     socketRef.current = io('http://localhost:5002');
 
     socketRef.current.on('connect', () => {
@@ -101,90 +133,53 @@ const TranscriptionRoom = ({ initialService }) => {
 
     socketRef.current.on('transcription', (transcription) => {
       console.log('Received transcription:', transcription);
-      if (transcription.isFinal) {
-        // Clean up the transcription text by removing leading "you" if it's the first word
-        let cleanedText = transcription.text.replace(/^you\s*/i, '').trim();
-        
-        // Capitalize first letter if it's lowercase
-        if (cleanedText.length > 0) {
-          cleanedText = cleanedText.charAt(0).toUpperCase() + cleanedText.slice(1);
-        }
-        
-        // Only update if there's actual content after cleaning
-        if (cleanedText) {
-          // Add speaker information if available
-          const speakerTag = transcription.speakerTag || 0;
-          const speakerPrefix = speakerTag > 0 ? `Speaker ${speakerTag}: ` : '';
-          const formattedText = speakerPrefix + cleanedText;
-          
-          setCurrentBlock(prev => {
-            const now = Date.now();
-            
-            // If no current block or block is complete, start a new one
-            if (!prev.startTime || prev.isComplete) {
-              return {
-                text: formattedText,
-                startTime: now,
-                isComplete: false,
-                sentences: [formattedText],
-                lastSpeaker: speakerTag || 0
-              };
-            }
-            
-            // Check if 20 seconds have passed
-            const blockAge = now - prev.startTime;
-            if (blockAge >= 20000) {
-              // Complete current block and start new one
-              setTranscriptBlocks(blocks => [...blocks, {
-                ...prev,
-                isComplete: true
-              }]);
-              
-              return {
-                text: formattedText,
-                startTime: now,
-                isComplete: false,
-                sentences: [formattedText],
-                lastSpeaker: speakerTag || 0
-              };
-            }
-            
-            // Add to current block - flow text naturally
-            // Only add new line for speaker changes, otherwise just space
-            let separator = ' ';
-            
-            // Check if there's a speaker change
-            const currentSpeaker = speakerTag || 0;
-            const prevSpeaker = prev.lastSpeaker || 0;
-            
-            if (currentSpeaker !== prevSpeaker && currentSpeaker > 0) {
-              separator = '\n\n';
-            }
-            
-            return {
-              ...prev,
-              text: prev.text + separator + formattedText,
-              sentences: [...(prev.sentences || []), formattedText],
-              lastSpeaker: currentSpeaker
-            };
-          });
+      
+      if (!transcription?.text) return;
 
-          // Update current segment for AI analysis
-          setCurrentSegment(prev => {
-            if (!prev.startTime) {
-              return {
-                text: cleanedText,
-                startTime: Date.now(),
-                timeLeft: 20
-              };
-            }
-            return {
-              ...prev,
-              text: prev.text + ' ' + cleanedText
-            };
-          });
+      const isFinal = Boolean(transcription.isFinal);
+      const utteranceEnd = Boolean(transcription.speechFinal);
+      const txt = transcription.text.trim();
+      if (!txt) return;
+
+      setCurrentBlock(prev => {
+        // Start block if needed
+        const now = Date.now();
+        const shouldRotate = prev.startTime && now - prev.startTime > 20000;
+        if (!prev.startTime || prev.isComplete || shouldRotate) {
+          if (prev.text || prev.interim) {
+            setTranscriptBlocks(blocks => {
+              const next = [...blocks, { ...prev, isComplete: true }];
+              setHistoryIdx(next.length - 1);
+              // Flash green, then hold yellow until the next finalized item arrives
+              setHistoryStage('new');
+              setTimeout(() => setHistoryStage('warn'), 1500);
+              return next;
+            });
+          }
+          return {
+            text: isFinal ? txt : '',
+            interim: isFinal ? '' : txt,
+            startTime: now,
+            isComplete: false,
+          };
         }
-      }
+
+        // Update existing block
+        if (isFinal) {
+          const combined = prev.text
+            ? (prev.text.endsWith('.') ? prev.text + ' ' + txt : prev.text + ' ' + txt)
+            : txt;
+          return { ...prev, text: combined, interim: '' };
+        } else if (utteranceEnd) {
+          // Promote interim as a finished sentence when Deepgram marks utterance end
+          const combined = prev.text
+            ? (prev.text.endsWith('.') ? prev.text + ' ' + txt : prev.text + ' ' + txt)
+            : txt;
+          return { ...prev, text: combined, interim: '' };
+        } else {
+          return { ...prev, interim: txt };
+        }
+      });
     });
 
     // Add error handling
@@ -316,41 +311,42 @@ const TranscriptionRoom = ({ initialService }) => {
       // Add gain control
       const gainNode = audioContextRef.current.createGain();
       gainNode.gain.value = 1.5;
-      
-      const processor = audioContextRef.current.createScriptProcessor(8192, 1, 1);
+
+      // Load and initialize the AudioWorklet
+      await audioContextRef.current.audioWorklet.addModule('/audio-processor.worklet.js');
+      const workletNode = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
       
       source.connect(noiseGate);
       noiseGate.connect(gainNode);
-      gainNode.connect(processor);
-      processor.connect(audioContextRef.current.destination);
+      gainNode.connect(workletNode);
+      workletNode.connect(audioContextRef.current.destination);
 
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        
-        // Apply simple noise reduction
-        const filteredData = new Float32Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          // Simple noise gate - suppress very quiet sounds
-          if (Math.abs(inputData[i]) < 0.01) {
-            filteredData[i] = 0;
-          } else {
-            filteredData[i] = inputData[i];
+      workletNode.port.onmessage = (event) => {
+        const { audioData } = event.data;
+        if (audioData) {
+          // Convert Float32Array to Int16Array
+          const float32Array = new Float32Array(audioData);
+          const int16Array = new Int16Array(float32Array.length);
+          
+          for (let i = 0; i < float32Array.length; i++) {
+            // Apply noise gate
+            let sample = float32Array[i];
+            if (Math.abs(sample) < 0.01) {
+              sample = 0;
+            }
+            
+            // Convert to 16-bit PCM
+            const s = Math.max(-1, Math.min(1, sample));
+            int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          
+          socketRef.current.emit('audio_data', {
+            roomId,
+            audio: int16Array.buffer,
+            isScreenShare: true,
+            service: selectedService
+          });
         }
-        }
-        
-        // Convert to 16-bit PCM
-        const pcmData = new Int16Array(filteredData.length);
-        for (let i = 0; i < filteredData.length; i++) {
-          const s = Math.max(-1, Math.min(1, filteredData[i]));
-          pcmData[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-        }
-        
-        socketRef.current.emit('audio_data', {
-          roomId,
-          audio: pcmData.buffer,
-          isScreenShare: true,
-          service: selectedService
-        });
       };
 
       // Start recording automatically when screen sharing starts
@@ -425,26 +421,35 @@ const TranscriptionRoom = ({ initialService }) => {
   const startRecording = async (existingStream = null) => {
     try {
       const stream = existingStream || await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioContextRef.current = new AudioContext();
+      audioContextRef.current = new AudioContext({ sampleRate: 16000 });
       const source = audioContextRef.current.createMediaStreamSource(stream);
-      const processor = audioContextRef.current.createScriptProcessor(1024, 1, 1);
-      
-      source.connect(processor);
-      processor.connect(audioContextRef.current.destination);
 
-      processor.onaudioprocess = (e) => {
-        const audioData = e.inputBuffer.getChannelData(0);
-        const int16Array = new Int16Array(audioData.length);
-        for (let i = 0; i < audioData.length; i++) {
-          int16Array[i] = audioData[i] * 0x7FFF;
+      // Load and initialize the AudioWorklet
+      await audioContextRef.current.audioWorklet.addModule('/audio-processor.worklet.js');
+      const workletNode = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
+      
+      source.connect(workletNode);
+      workletNode.connect(audioContextRef.current.destination);
+
+      workletNode.port.onmessage = (event) => {
+        const { audioData } = event.data;
+        if (audioData) {
+          // Convert Float32Array to Int16Array
+          const float32Array = new Float32Array(audioData);
+          const int16Array = new Int16Array(float32Array.length);
+          
+          for (let i = 0; i < float32Array.length; i++) {
+            const s = Math.max(-1, Math.min(1, float32Array[i]));
+            int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          
+          socketRef.current.emit('audio_data', {
+            roomId,
+            audio: int16Array.buffer,
+            isScreenShare: !!existingStream,
+            service: selectedService
+          });
         }
-        
-        socketRef.current.emit('audio_data', {
-          roomId,
-          audio: int16Array.buffer,
-          isScreenShare: !!existingStream,
-          service: selectedService
-        });
       };
 
       socketRef.current.emit('start_transcription', { 
@@ -716,10 +721,32 @@ const TranscriptionRoom = ({ initialService }) => {
                             playsInline
                             className="w-full h-full object-contain"
                           />
-                          <Badge className="absolute top-2 left-2" variant="destructive">
-                            <span className="h-2 w-2 bg-red-500 rounded-full mr-2 animate-pulse" />
-                            Live
-                          </Badge>
+                          <div className="absolute top-2 left-2 flex gap-2">
+                            <Badge variant="destructive">
+                              <span className="h-2 w-2 bg-red-500 rounded-full mr-2 animate-pulse" />
+                              Live
+                            </Badge>
+                            <Badge variant="secondary">
+                              {selectedService === 'deepgram' ? 'Deepgram' : 
+                               selectedService === 'openai' ? 'OpenAI' : 'Google Cloud'}
+                            </Badge>
+                          </div>
+                          {debugMode && isOverlayVisible && (currentBlock.text || currentBlock.interim) && (
+                            <div className="absolute bottom-12 left-2 right-12">
+                              <div className="mx-auto max-w-3xl bg-black/65 backdrop-blur-sm rounded-lg border border-white/10 shadow-lg">
+                                <p className="px-3 py-2 text-white text-sm leading-relaxed">
+                                  {getOverlayText()}
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                          {debugMode && (
+                            <div className="absolute top-2 right-2">
+                              <Button size="sm" variant={isOverlayVisible ? 'secondary' : 'outline'} onClick={() => setIsOverlayVisible(v => { const nv = !v; localStorage.setItem('overlay_visible', nv ? '1' : '0'); return nv; })} title="Toggle overlay (O)">
+                                {isOverlayVisible ? 'Overlay On' : 'Overlay Off'}
+                              </Button>
+                            </div>
+                          )}
                           <div className="absolute bottom-2 right-2 flex gap-2">
                             <Button size="sm" variant="secondary" onClick={stopScreenShare}>
                               <StopCircle className="h-4 w-4 mr-1" />
@@ -755,7 +782,93 @@ const TranscriptionRoom = ({ initialService }) => {
 
                 {/* Transcripts */}
                 <ScrollArea className="flex-1 pr-4" ref={transcriptsRef}>
-                  {renderTranscripts()}
+                  {/* Live transcription pinned at top */}
+                  {(isRecording || isScreenSharing) && (
+                    <div className="mb-3 p-2 bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60 rounded-lg border border-primary/20">
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="h-2 w-2 bg-red-500 rounded-full animate-pulse" />
+                          <span className="text-sm font-medium">Live Transcription</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline">
+                            {selectedService === 'deepgram' ? 'Deepgram' : 
+                             selectedService === 'openai' ? 'OpenAI' : 'Google Cloud'}
+                          </Badge>
+                          {currentBlock.metadata?.speechRate && (
+                            <Badge variant="secondary" className="text-xs">
+                              {Math.round(currentBlock.metadata.speechRate * 60)} wpm
+                            </Badge>
+                          )}
+                          {currentBlock.metadata?.hasFillerWords && (
+                            <Badge variant="secondary" className="text-xs">Filler Words</Badge>
+                          )}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        {/* Constrained, scrollable live text so controls stay visible */}
+                        <div className="rounded-md bg-secondary/50 border border-border/40">
+                          <ScrollArea className="h-28 md:h-36 no-scrollbar">
+                            <div className="p-2">
+                              <p className="text-xs leading-relaxed whitespace-pre-wrap">
+                                {(currentBlock.text + (currentBlock.interim ? ` ${currentBlock.interim}` : '')).trim() || "Listening..."}
+                              </p>
+                            </div>
+                          </ScrollArea>
+                        </div>
+                        {currentBlock.metadata?.sentiment && (
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2">
+                            <Badge variant={
+                              currentBlock.metadata.sentiment === 'positive' ? 'success' :
+                              currentBlock.metadata.sentiment === 'negative' ? 'destructive' :
+                              'secondary'
+                            }>
+                              {currentBlock.metadata.sentiment}
+                            </Badge>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {/* Horizontal carousel for finalized blocks */}
+                  {transcriptBlocks.length > 0 && (
+                    <div className="mb-4">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-sm text-muted-foreground">History</span>
+                        <div className="flex gap-2">
+                          <Badge variant="secondary" className="text-xs">{(historyIdx ?? (transcriptBlocks.length-1)) + 1} / {transcriptBlocks.length}</Badge>
+                          <Button variant="secondary" size="sm" onClick={() => setHistoryIdx(idx => Math.max(0, (idx ?? transcriptBlocks.length-1) - 1))}>Prev</Button>
+                          <Button variant="secondary" size="sm" onClick={() => setHistoryIdx(idx => Math.min(transcriptBlocks.length - 1, (idx ?? transcriptBlocks.length-1) + 1))}>Next</Button>
+                        </div>
+                      </div>
+                      <Card
+                        className={`relative group cursor-pointer transition-colors duration-500 ${historyStage==='new' ? 'border-green-400' : historyStage==='warn' ? 'border-yellow-400' : ''}`}
+                        onClick={async () => {
+                          const text = transcriptBlocks[historyIdx ?? (transcriptBlocks.length-1)]?.text || '';
+                          try {
+                            await navigator.clipboard.writeText(text);
+                            setHistoryCopied(true);
+                            setTimeout(() => setHistoryCopied(false), 1200);
+                          } catch (e) {}
+                        }}
+                        title="Click to copy"
+                      >
+                        <CardContent className="pt-6">
+                          <ScrollArea className="max-h-60 md:max-h-72 no-scrollbar pr-2">
+                            <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                              {transcriptBlocks[historyIdx ?? (transcriptBlocks.length-1)]?.text}
+                            </p>
+                          </ScrollArea>
+                        </CardContent>
+                        {/* Copy overlay feedback */}
+                        <div className={`pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity duration-300 ${historyCopied ? 'opacity-100' : 'opacity-0'} bg-black/30 rounded-lg`}>
+                          <span className="text-xs px-2 py-1 rounded bg-black/70 text-white border border-white/20">Copied</span>
+                        </div>
+                        {/* Hover hint */}
+                        <div className="pointer-events-none absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 text-xs text-muted-foreground">Click to copy</div>
+                      </Card>
+                    </div>
+                  )}
                 </ScrollArea>
 
                 {/* Export Button */}
