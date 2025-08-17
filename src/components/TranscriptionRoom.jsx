@@ -16,7 +16,9 @@ import {
   Maximize2,
   Clock,
   Copy,
-  Check
+  Check,
+  Bug,
+  Activity
 } from 'lucide-react';
 import AIResponse from './AIResponse';
 import Settings from './Settings/Settings.jsx';
@@ -50,7 +52,8 @@ const TranscriptionRoom = ({ initialService }) => {
     text: '',
     interim: '',
     startTime: null,
-    isComplete: false
+    isComplete: false,
+    id: null
   });
   const [selectedAgent, setSelectedAgent] = useState('MEETING_ANALYST');
   const [roomContext, setRoomContext] = useState(null);
@@ -59,6 +62,48 @@ const TranscriptionRoom = ({ initialService }) => {
   const [historyCopied, setHistoryCopied] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
   const [isOverlayVisible, setIsOverlayVisible] = useState(true);
+  const sessionStartRef = useRef(null);
+  const sessionTimerRef = useRef(null);
+  const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
+  const [linkCopied, setLinkCopied] = useState(false);
+  const [debugPanelOpen, setDebugPanelOpen] = useState(false);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [audioKbps, setAudioKbps] = useState(0);
+  const [chunksPerSec, setChunksPerSec] = useState(0);
+  const [dgMetadata, setDgMetadata] = useState(null);
+  const [avgLatencyMs, setAvgLatencyMs] = useState(0);
+  const debugStatsRef = useRef({ bytesSent: 0, lastBytes: 0, chunksSent: 0, lastChunks: 0, interimCount: 0, finalCount: 0, lastTick: Date.now(), lastEmitTs: 0, latencies: [] });
+
+  const [debugSettings, setDebugSettings] = useState({
+    // feature/context-encoder
+    maskedPrediction: false,
+    attentionType: 'standard', // standard | relative | conformer | rotary
+    multiScale: false,
+    // feature/fusion-strategies
+    fusionMethod: 'none', // none | concat | geometric | learned
+    adaptiveGating: false,
+    crossModalAttention: false,
+    // feature/noise-augmentation
+    noiseMixLevel: 0,
+    environmentProfile: 'none', // none | office | cafe | street | car
+    realWorldConditions: false,
+    // feature/performance-optimization
+    latencyTargetMs: 800,
+    memoryEfficient: true,
+    inferenceSpeedup: true,
+    // feature/training-pipeline (placeholders)
+    distributedTraining: false,
+    mixedPrecision: true,
+    gradAccumulation: false,
+    // feature/evaluation-metrics
+    enableAdvancedWER: true,
+    runNoiseRobustness: false,
+    enableLatencyProfiling: true,
+    // feature/model-compression
+    knowledgeDistillation: false,
+    quantization: 'none', // none | int8 | fp16
+    pruning: false,
+  });
 
   // Helper for a clean overlay caption (recent snippet only)
   const getOverlayText = useCallback(() => {
@@ -95,6 +140,16 @@ const TranscriptionRoom = ({ initialService }) => {
     }
   };
 
+  const formatDuration = useCallback((ms) => {
+    if (!ms || ms < 0) return '00:00';
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const two = (n) => String(n).padStart(2, '0');
+    return hours > 0 ? `${two(hours)}:${two(minutes)}:${two(seconds)}` : `${two(minutes)}:${two(seconds)}`;
+  }, []);
+
   useEffect(() => {
     // Enable debug via ?debug=1 or localStorage('debug_mode')
     const params = new URLSearchParams(window.location.search);
@@ -112,12 +167,19 @@ const TranscriptionRoom = ({ initialService }) => {
       return () => window.removeEventListener('keydown', handler);
     }
 
-    socketRef.current = io('http://localhost:5002');
+    const inferredUrl = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : undefined;
+    const serverUrl = process.env.PUBLIC_SERVER_URL || process.env.REACT_APP_SERVER_URL || inferredUrl || 'http://localhost:5002';
+    socketRef.current = io(serverUrl, {
+      autoConnect: true,
+      query: {
+        desiredRoomId: (typeof window !== 'undefined' && sessionStorage.getItem('desired_room_id')) || ''
+      }
+    });
 
     socketRef.current.on('connect', () => {
       const socketId = socketRef.current.id;
       setRoomId(socketId);
-      
+      try { sessionStorage.setItem('desired_room_id', socketId); } catch (_) {}
       window.history.pushState({}, '', `/${socketId}`);
     });
 
@@ -141,6 +203,20 @@ const TranscriptionRoom = ({ initialService }) => {
       const txt = transcription.text.trim();
       if (!txt) return;
 
+      // Debug stats & metadata
+      try {
+        if (isFinal) debugStatsRef.current.finalCount += 1; else debugStatsRef.current.interimCount += 1;
+        if (transcription.metadata) setDgMetadata(transcription.metadata);
+        if (debugStatsRef.current.lastEmitTs) {
+          const latency = Date.now() - debugStatsRef.current.lastEmitTs;
+          const arr = debugStatsRef.current.latencies;
+          arr.push(latency);
+          if (arr.length > 20) arr.shift();
+          const avg = Math.round(arr.reduce((a, b) => a + b, 0) / arr.length);
+          setAvgLatencyMs(avg);
+        }
+      } catch (_) {}
+
       setCurrentBlock(prev => {
         // Start block if needed
         const now = Date.now();
@@ -148,11 +224,21 @@ const TranscriptionRoom = ({ initialService }) => {
         if (!prev.startTime || prev.isComplete || shouldRotate) {
           if (prev.text || prev.interim) {
             setTranscriptBlocks(blocks => {
-              const next = [...blocks, { ...prev, isComplete: true }];
+              const newId = prev.id || `${Date.now()}_${blocks.length}`;
+              const next = [...blocks, { ...prev, isComplete: true, id: newId }];
               setHistoryIdx(next.length - 1);
               // Flash green, then hold yellow until the next finalized item arrives
               setHistoryStage('new');
               setTimeout(() => setHistoryStage('warn'), 1500);
+              // Trigger AI analysis for this finalized block
+              try {
+                socketRef.current.emit('process_with_ai', { 
+                  text: (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim(),
+                  roomId,
+                  agentType: selectedAgent,
+                  blockId: newId
+                });
+              } catch (_) {}
               return next;
             });
           }
@@ -161,6 +247,7 @@ const TranscriptionRoom = ({ initialService }) => {
             interim: isFinal ? '' : txt,
             startTime: now,
             isComplete: false,
+            id: `${now}_${Math.random().toString(36).slice(2,8)}`,
           };
         }
 
@@ -188,6 +275,19 @@ const TranscriptionRoom = ({ initialService }) => {
       alert(`Transcription error: ${error.message}`);
     });
 
+    // Debug bandwidth/chunk metrics ticker
+    const dbgTicker = setInterval(() => {
+      const now = Date.now();
+      const elapsed = Math.max(1, (now - (debugStatsRef.current.lastTick || now)) / 1000);
+      const bytesDelta = debugStatsRef.current.bytesSent - (debugStatsRef.current.lastBytes || 0);
+      const chunksDelta = debugStatsRef.current.chunksSent - (debugStatsRef.current.lastChunks || 0);
+      setAudioKbps(Math.round((bytesDelta * 8) / 1000 / elapsed));
+      setChunksPerSec(Math.round(chunksDelta / elapsed));
+      debugStatsRef.current.lastBytes = debugStatsRef.current.bytesSent;
+      debugStatsRef.current.lastChunks = debugStatsRef.current.chunksSent;
+      debugStatsRef.current.lastTick = now;
+    }, 1000);
+
     // Set up interval for processing accumulated transcripts
     const analysisInterval = setInterval(() => {
       setCurrentSegment(prev => {
@@ -200,15 +300,31 @@ const TranscriptionRoom = ({ initialService }) => {
     }, ANALYSIS_INTERVAL);
 
     socketRef.current.on('ai_response', (response) => {
-      setAiResponses(prev => [...prev, {
-        text: response.text,
-        timestamp: new Date().toISOString(),
-        isError: response.isError,
-        isMock: response.isMock,
-        agent: response.agent,
-        roomContext: response.roomContext,
-        isFormatted: response.isFormatted
-      }]);
+      // Attach response to a specific block if blockId is provided
+      if (response.blockId) {
+        setTranscriptBlocks(prev => prev.map(b => (
+          b.id === response.blockId
+            ? { ...b, ai: { 
+                text: response.text,
+                timestamp: new Date().toISOString(),
+                isError: response.isError,
+                agent: response.agent,
+                roomContext: response.roomContext,
+                isFormatted: response.isFormatted
+              } }
+            : b
+        )));
+      } else {
+        setAiResponses(prev => [...prev, {
+          text: response.text,
+          timestamp: new Date().toISOString(),
+          isError: response.isError,
+          isMock: response.isMock,
+          agent: response.agent,
+          roomContext: response.roomContext,
+          isFormatted: response.isFormatted
+        }]);
+      }
       setIsAiThinking(false);
       
       // Update room context if provided
@@ -225,6 +341,7 @@ const TranscriptionRoom = ({ initialService }) => {
       cleanupAudioContext();
       clearInterval(countdownInterval);
       clearInterval(analysisInterval);
+      clearInterval(dbgTicker);
       if (socketRef.current) {
         window.history.pushState({}, '', '/');
         socketRef.current.disconnect();
@@ -262,6 +379,12 @@ const TranscriptionRoom = ({ initialService }) => {
     try {
       setIsProviderLocked(true);
       setCurrentStep('transcribing');
+      // Start session timer
+      sessionStartRef.current = Date.now();
+      if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+      sessionTimerRef.current = setInterval(() => {
+        setSessionElapsedMs(Date.now() - sessionStartRef.current);
+      }, 1000);
       
       if (socketRef.current?.id && selectedService) {
         window.history.pushState(
@@ -340,6 +463,19 @@ const TranscriptionRoom = ({ initialService }) => {
             int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
           }
           
+          const bytes = int16Array.byteLength;
+          debugStatsRef.current.bytesSent += bytes;
+          debugStatsRef.current.chunksSent += 1;
+          debugStatsRef.current.lastEmitTs = Date.now();
+          // simple audio level meter (RMS approximation)
+          let sum = 0;
+          for (let i = 0; i < int16Array.length; i += 32) {
+            const v = int16Array[i] / 32767;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / Math.max(1, Math.floor(int16Array.length / 32)));
+          setAudioLevel(prev => 0.8 * prev + 0.2 * rms);
+
           socketRef.current.emit('audio_data', {
             roomId,
             audio: int16Array.buffer,
@@ -408,6 +544,11 @@ const TranscriptionRoom = ({ initialService }) => {
       
       setIsScreenSharing(false);
       setScreenPreview(null);
+      // Stop session timer
+      if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+      sessionTimerRef.current = null;
+      sessionStartRef.current = null;
+      setSessionElapsedMs(0);
       
       // Reset back to step 1
       setIsProviderLocked(false);
@@ -420,6 +561,15 @@ const TranscriptionRoom = ({ initialService }) => {
 
   const startRecording = async (existingStream = null) => {
     try {
+      // Start session timer if not already running
+      if (!sessionStartRef.current) {
+        sessionStartRef.current = Date.now();
+        if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+        sessionTimerRef.current = setInterval(() => {
+          setSessionElapsedMs(Date.now() - sessionStartRef.current);
+        }, 1000);
+      }
+
       const stream = existingStream || await navigator.mediaDevices.getUserMedia({ audio: true });
       audioContextRef.current = new AudioContext({ sampleRate: 16000 });
       const source = audioContextRef.current.createMediaStreamSource(stream);
@@ -443,6 +593,18 @@ const TranscriptionRoom = ({ initialService }) => {
             int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
           }
           
+          const bytes = int16Array.byteLength;
+          debugStatsRef.current.bytesSent += bytes;
+          debugStatsRef.current.chunksSent += 1;
+          // quick level
+          let sum = 0;
+          for (let i = 0; i < int16Array.length; i += 32) {
+            const v = int16Array[i] / 32767;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / Math.max(1, Math.floor(int16Array.length / 32)));
+          setAudioLevel(prev => 0.8 * prev + 0.2 * rms);
+
           socketRef.current.emit('audio_data', {
             roomId,
             audio: int16Array.buffer,
@@ -468,6 +630,13 @@ const TranscriptionRoom = ({ initialService }) => {
       cleanupAudioContext();
       socketRef.current.emit('stop_transcription', roomId);
       setIsRecording(false);
+      // Stop session timer if screen share is not active
+      if (!isScreenSharing) {
+        if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+        sessionTimerRef.current = null;
+        sessionStartRef.current = null;
+        setSessionElapsedMs(0);
+      }
     } catch (error) {
       console.error('Error stopping recording:', error);
     }
@@ -668,10 +837,44 @@ const TranscriptionRoom = ({ initialService }) => {
   return (
     <div className="min-h-screen bg-background p-4 lg:p-6">
       <div className="max-w-[1600px] mx-auto">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <StepIndicator />
+        {/* Header: Enterprise quick polish */}
+        <div className="flex items-center justify-between mb-6 py-2">
           <div className="flex items-center gap-4">
+            <div>
+              <div className="text-lg font-semibold tracking-tight">ASR SyncScribe</div>
+              <div className="text-xs text-muted-foreground">Room • {roomId || '—'}</div>
+            </div>
+            <div className="hidden md:flex items-center gap-2 pl-4 border-l border-border/60">
+              <Badge variant="secondary">
+                {selectedService === 'deepgram' ? 'Deepgram' : selectedService === 'openai' ? 'OpenAI' : selectedService === 'google' ? 'Google Cloud' : 'Provider'}
+              </Badge>
+              <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                <span className={`h-2 w-2 rounded-full ${isRecording || isScreenSharing ? 'bg-green-500 animate-pulse' : 'bg-orange-500'}`} />
+                {isRecording || isScreenSharing ? 'Live' : 'Idle'}
+              </span>
+              <span className="text-xs text-muted-foreground">{formatDuration(sessionElapsedMs)}</span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(window.location.href);
+                  setLinkCopied(true);
+                  setTimeout(() => setLinkCopied(false), 1500);
+                } catch (e) {}
+              }}
+              title="Copy room link"
+            >
+              {linkCopied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}Copy Link
+            </Button>
+            {(transcriptBlocks.length > 0 || currentBlock.text) && (
+              <Button variant="outline" size="sm" onClick={exportTranscript}>
+                <Download className="h-4 w-4 mr-2" />Export
+              </Button>
+            )}
             <Settings 
               selectedService={selectedService}
               setSelectedService={setSelectedService}
@@ -928,21 +1131,38 @@ const TranscriptionRoom = ({ initialService }) => {
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[calc(100vh-16rem)]" ref={aiResponsesRef}>
-                  {aiResponses.length === 0 ? (
-                    <div className="text-center text-muted-foreground py-12">
-                      <p>Analysis will appear every 20 seconds.</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-4">
-                      {aiResponses.map((response, index) => (
-                        <Card key={index}>
-                          <CardContent className="pt-6">
-                            <AIResponse response={response} />
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  )}
+                  {(() => {
+                    const idx = historyIdx ?? (transcriptBlocks.length - 1);
+                    const ai = transcriptBlocks[idx]?.ai;
+                    if (ai) {
+                      return (
+                        <div className="space-y-4">
+                          <Card>
+                            <CardContent className="pt-6">
+                              <AIResponse response={ai} />
+                            </CardContent>
+                          </Card>
+                        </div>
+                      );
+                    }
+                    return (
+                      aiResponses.length === 0 ? (
+                        <div className="text-center text-muted-foreground py-12">
+                          <p>Analysis will appear every 20 seconds.</p>
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          {aiResponses.map((response, index) => (
+                            <Card key={index}>
+                              <CardContent className="pt-6">
+                                <AIResponse response={response} />
+                              </CardContent>
+                            </Card>
+                          ))}
+                        </div>
+                      )
+                    );
+                  })()}
                   {isAiThinking && (
                     <Card className="mt-4">
                       <CardContent className="pt-6">
@@ -959,6 +1179,112 @@ const TranscriptionRoom = ({ initialService }) => {
           </div>
         </div>
       </div>
+
+      {/* Footer debug floating button */}
+      <div className="fixed bottom-4 right-4 flex items-center gap-2 z-50">
+        <Button
+          variant={debugPanelOpen ? 'destructive' : 'secondary'}
+          size="icon"
+          title="Debug tools"
+          onClick={() => setDebugPanelOpen(v => !v)}
+        >
+          <Bug className="h-5 w-5 text-red-500" />
+        </Button>
+      </div>
+
+      {/* Debug side panel */}
+      {debugPanelOpen && (
+        <div className="fixed bottom-16 right-4 w-[340px] max-h-[70vh] bg-background/95 backdrop-blur border rounded-lg shadow-xl z-50 overflow-hidden">
+          <div className="px-4 py-3 border-b flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Activity className="h-4 w-4 text-primary" />
+              <span className="text-sm font-medium">ASR Debug</span>
+            </div>
+            <Badge variant="secondary">{selectedService || '—'}</Badge>
+          </div>
+          <div className="p-4 space-y-3 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">Audio level</span>
+              <div className="w-40 h-2 bg-secondary rounded-full overflow-hidden">
+                <div className="h-full bg-primary transition-all" style={{ width: `${Math.min(100, Math.round(audioLevel*100))}%` }} />
+              </div>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">Uplink</span>
+              <span>{audioKbps} kbps • {chunksPerSec} chunks/s</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">Interim / Final</span>
+              <span>{debugStatsRef.current.interimCount} / {debugStatsRef.current.finalCount}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">Avg transcript latency</span>
+              <span>{avgLatencyMs} ms</span>
+            </div>
+            {dgMetadata && (
+              <div className="mt-2">
+                <div className="text-muted-foreground mb-1">Deepgram</div>
+                <pre className="bg-muted/40 rounded p-2 overflow-auto max-h-40">{JSON.stringify(dgMetadata, null, 2)}</pre>
+              </div>
+            )}
+            <div className="pt-2 border-t">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Overlay captions</span>
+                <Button size="sm" variant={isOverlayVisible ? 'secondary' : 'outline'} onClick={() => setIsOverlayVisible(v => { const nv = !v; localStorage.setItem('overlay_visible', nv ? '1' : '0'); return nv; })}>
+                  {isOverlayVisible ? 'On' : 'Off'}
+                </Button>
+              </div>
+              <div className="mt-2 flex items-center justify-between">
+                <span className="text-muted-foreground">Auto scroll</span>
+                <Button size="sm" variant={isAutoScrollEnabled ? 'secondary' : 'outline'} onClick={() => setIsAutoScrollEnabled(v => !v)}>
+                  {isAutoScrollEnabled ? 'On' : 'Off'}
+                </Button>
+              </div>
+              {/* Advanced toggles (placeholders wiring) */}
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.maskedPrediction} onChange={(e)=>setDebugSettings(s=>({...s, maskedPrediction:e.target.checked}))} /> Masked prediction</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.multiScale} onChange={(e)=>setDebugSettings(s=>({...s, multiScale:e.target.checked}))} /> Multi-scale</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.adaptiveGating} onChange={(e)=>setDebugSettings(s=>({...s, adaptiveGating:e.target.checked}))} /> Adaptive gating</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.crossModalAttention} onChange={(e)=>setDebugSettings(s=>({...s, crossModalAttention:e.target.checked}))} /> Cross-modal attention</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.realWorldConditions} onChange={(e)=>setDebugSettings(s=>({...s, realWorldConditions:e.target.checked}))} /> Real-world conditions</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.memoryEfficient} onChange={(e)=>setDebugSettings(s=>({...s, memoryEfficient:e.target.checked}))} /> Memory efficient</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.inferenceSpeedup} onChange={(e)=>setDebugSettings(s=>({...s, inferenceSpeedup:e.target.checked}))} /> Inference speedup</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.enableAdvancedWER} onChange={(e)=>setDebugSettings(s=>({...s, enableAdvancedWER:e.target.checked}))} /> Advanced WER</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.runNoiseRobustness} onChange={(e)=>setDebugSettings(s=>({...s, runNoiseRobustness:e.target.checked}))} /> Noise robustness</label>
+                <label className="flex items-center gap-2 text-[11px]"><input type="checkbox" checked={debugSettings.enableLatencyProfiling} onChange={(e)=>setDebugSettings(s=>({...s, enableLatencyProfiling:e.target.checked}))} /> Latency profiling</label>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span>Noise mix level</span>
+                  <input type="range" min="0" max="100" value={debugSettings.noiseMixLevel} onChange={(e)=>setDebugSettings(s=>({...s, noiseMixLevel: Number(e.target.value)}))} />
+                </div>
+                <div className="flex items-center justify-between text-[11px]">
+                  <span>Latency target</span>
+                  <input className="w-16 bg-transparent border rounded px-1 py-0.5" type="number" min="100" max="3000" value={debugSettings.latencyTargetMs} onChange={(e)=>setDebugSettings(s=>({...s, latencyTargetMs: Number(e.target.value)}))} />
+                </div>
+                <div className="flex items-center justify-between text-[11px] col-span-2">
+                  <span>Environment</span>
+                  <select className="bg-transparent border rounded px-1 py-0.5" value={debugSettings.environmentProfile} onChange={(e)=>setDebugSettings(s=>({...s, environmentProfile:e.target.value}))}>
+                    <option value="none">None</option>
+                    <option value="office">Office</option>
+                    <option value="cafe">Cafe</option>
+                    <option value="street">Street</option>
+                    <option value="car">Car</option>
+                  </select>
+                </div>
+                <div className="flex items-center justify-between text-[11px] col-span-2">
+                  <span>Quantization</span>
+                  <select className="bg-transparent border rounded px-1 py-0.5" value={debugSettings.quantization} onChange={(e)=>setDebugSettings(s=>({...s, quantization:e.target.value}))}>
+                    <option value="none">None</option>
+                    <option value="int8">INT8</option>
+                    <option value="fp16">FP16</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
