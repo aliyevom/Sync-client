@@ -47,6 +47,14 @@ const AI_AGENTS = [
     icon: ListChecks,
     color: 'text-orange-600',
     features: ['Action items', 'Decision tracking', 'Blockers', 'Commitments']
+  },
+  {
+    id: 'SPOKEN_RESPONDER',
+    name: 'Speaker Coach',
+    description: 'Generates one-paragraph, human-sounding replies you can read aloud',
+    icon: Bot,
+    color: 'text-amber-600',
+    features: ['Single paragraph', 'Human tone', 'Conversation flow']
   }
 ];
 
