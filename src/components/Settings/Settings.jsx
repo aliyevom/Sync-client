@@ -217,7 +217,7 @@ function Settings({
                     >
                       <Badge className="absolute top-2 right-2" variant="secondary">Available</Badge>
                       <img 
-                        src="/images/deepgram.png" 
+                        src="/images/deepgram.svg" 
                         alt="Deepgram"
                         className="w-full h-20 object-contain mb-2"
                       />
