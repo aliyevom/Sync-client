@@ -150,6 +150,27 @@ const TranscriptionRoom = ({ initialService }) => {
     return hours > 0 ? `${two(hours)}:${two(minutes)}:${two(seconds)}` : `${two(minutes)}:${two(seconds)}`;
   }, []);
 
+  // Confirm before closing an active room and create a fresh room on reload
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (isRecording || isScreenSharing) {
+        // Show native confirm dialog
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    const handlePageHide = () => {
+      // User confirmed leaving - clear cached room so a new one is created on next load
+      try { sessionStorage.removeItem('desired_room_id'); } catch (_) {}
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [isRecording, isScreenSharing]);
+
   useEffect(() => {
     // Enable debug via ?debug=1 or localStorage('debug_mode')
     const params = new URLSearchParams(window.location.search);
@@ -377,6 +398,17 @@ const TranscriptionRoom = ({ initialService }) => {
 
   const startScreenShare = async () => {
     try {
+      // Guard: Screen Capture API requires a secure context (HTTPS) or localhost
+      const secure = (typeof window !== 'undefined' && (window.isSecureContext || window.location.protocol === 'https:' || window.location.hostname === 'localhost'));
+      const hasAPI = typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function';
+      if (!secure || !hasAPI) {
+        const why = !secure ? 'This page is not served over HTTPS (secure context).' : 'Screen Capture API is not available in this browser.';
+        alert(`Screen sharing is unavailable: ${why}\n\nUse an HTTPS URL (or localhost) and a modern Chromium/Firefox browser.`);
+        // Fallback: start mic-only recording if possible
+        await startRecording();
+        return;
+      }
+
       setIsProviderLocked(true);
       setCurrentStep('transcribing');
       // Start session timer
