@@ -1,0 +1,39 @@
+/* RAG Highlighted Text Styles - Simple Inline Tag */
+
+.rag-highlighted-content {
+  line-height: 1.8;
+  font-size: 0.95rem;
+  display: block;
+  margin: 0;
+  padding: 0;
+}
+
+.rag-inline-tag {
+  display: inline;
+  padding: 0.2rem 0.5rem;
+  margin: 0 0.15rem;
+  border-radius: 0.4rem;
+  background-color: rgba(59, 130, 246, 0.15);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  color: rgba(147, 197, 253, 0.95);
+  font-weight: 500;
+  cursor: help;
+}
+
+/* Dark mode */
+@media (prefers-color-scheme: dark) {
+  .rag-inline-tag {
+    background-color: rgba(59, 130, 246, 0.2);
+    border-color: rgba(59, 130, 246, 0.5);
+    color: rgba(147, 197, 253, 1);
+  }
+}
+
+/* Light mode */
+@media (prefers-color-scheme: light) {
+  .rag-inline-tag {
+    background-color: rgba(59, 130, 246, 0.1);
+    border-color: rgba(59, 130, 246, 0.3);
+    color: rgba(29, 78, 216, 1);
+  }
+}
