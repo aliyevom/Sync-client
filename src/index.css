@@ -22,6 +22,166 @@
   animation: slide-in-right 320ms ease-out both;
 }
 
+/* Document Enhanced Badge Styles */
+.document-enhanced-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.3);
+}
+
+.document-enhanced-badge .badge-icon {
+  font-size: 1rem;
+}
+
+.document-enhanced-badge .badge-text {
+  font-weight: 600;
+}
+
+.document-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.doc-source {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.75rem;
+  padding: 0.25rem 0;
+}
+
+.doc-name {
+  font-family: monospace;
+  opacity: 0.9;
+}
+
+.doc-similarity {
+  background: rgba(255, 255, 255, 0.2);
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-weight: 600;
+}
+
+.ai-analysis.document-enhanced {
+  border-left: 4px solid #667eea;
+  padding-left: 1rem;
+}
+
+.ai-analysis.document-enhanced {
+  border-left: 4px solid #667eea;
+  padding-left: 1rem;
+}
+
+/* Separator between original and document-enhanced analysis */
+.ai-analysis-separator {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #667eea, transparent);
+  margin: 1.5rem 0;
+  position: relative;
+}
+
+.ai-analysis-separator::after {
+  content: '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━';
+  position: absolute;
+  top: -0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.5rem;
+  color: #667eea;
+  opacity: 0.3;
+}
+
+/* AI Response Content Styles */
+.ai-response-content {
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.ai-response-content .ai-analysis {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.ai-response-content .agent-header {
+  font-weight: 600;
+  color: var(--primary);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-response-content .analysis-section {
+  padding: 0.75rem;
+  background: var(--muted);
+  border-radius: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.ai-response-content .section-header {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  color: var(--foreground);
+}
+
+.ai-response-content .bullet-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.ai-response-content .bullet {
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+.ai-response-content .bullet-label {
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.ai-response-content .bullet-value {
+  color: var(--muted-foreground);
+}
+
+.ai-response-content .bullet-text {
+  color: var(--foreground);
+}
+
+.ai-response-content strong {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.ai-response-content code {
+  padding: 0.125rem 0.25rem;
+  background: var(--muted);
+  border-radius: 0.25rem;
+  font-family: monospace;
+  font-size: 0.8rem;
+}
+
+.ai-response-content p {
+  margin-bottom: 0.5rem;
+}
+
+.ai-response-content p:last-child {
+  margin-bottom: 0;
+}
+
 @layer base {
   :root {
     --background: 222.2 84% 4.9%;

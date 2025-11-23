@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { Card, CardContent, CardHeader } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { Bot, Copy, Check, Clock, AlertCircle, Sparkles, Users, Brain, ListChecks } from 'lucide-react';
+import { Bot, Copy, Check, Clock, AlertCircle, Users, Brain, ListChecks, FileText } from 'lucide-react';
 import { cn } from '../lib/utils';
+import RAGHighlightedText from './RAGHighlightedText';
 
 // Agent icon mapping
 const AGENT_ICONS = {
@@ -24,6 +25,16 @@ const AGENT_COLORS = {
 
 function AIResponse({ response }) {
   const [copied, setCopied] = useState(false);
+  
+  // Log the entire response object for debugging
+  console.log('[AIResponse] component received:', {
+    analysisType: response.analysisType,
+    ragUsed: response.ragUsed,
+    ragSources: response.ragSources,
+    hasText: !!response.text,
+    textLength: response.text?.length,
+    allKeys: Object.keys(response)
+  });
 
   const handleCopy = async () => {
     try {
@@ -46,18 +57,44 @@ function AIResponse({ response }) {
 
   const AgentIcon = AGENT_ICONS[response.agent] || Bot;
   const agentColor = AGENT_COLORS[response.agent] || 'text-gray-600';
+  
+  const isDocumentEnhanced = response.analysisType === 'document-enhanced';
+  const isOriginal = response.analysisType === 'original';
+  
+  console.log('[AIResponse] computed values:', {
+    isDocumentEnhanced,
+    isOriginal,
+    'response.analysisType': response.analysisType,
+    'response.ragUsed': response.ragUsed,
+    'condition (isDocumentEnhanced && response.ragUsed)': isDocumentEnhanced && response.ragUsed
+  });
 
     return (
     <Card className={cn(
-      "mb-4",
+      "mb-6", // Increased spacing between cards from mb-4 to mb-6
       response.isError && "border-destructive/50",
-      response.isFallback && "border-yellow-500/50"
+      response.isFallback && "border-yellow-500/50",
+      isDocumentEnhanced && "border-purple-500 border-2 bg-gradient-to-br from-purple-950/10 to-purple-900/5 shadow-lg shadow-purple-500/20",
+      isOriginal && "border-blue-500/40 border-2"
     )}>
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <AgentIcon className={cn("h-5 w-5", agentColor)} />
-            <span className="font-semibold text-sm">{response.agent || 'AI Analysis'}</span>
+            <span className="font-semibold text-sm">
+              {isDocumentEnhanced ? 'Document-Enhanced AI Analysis' : isOriginal ? 'Original AI Analysis' : response.agent || 'AI Analysis'}
+            </span>
+            {isDocumentEnhanced && response.ragTag && (
+              <Badge variant="default" className="text-xs bg-purple-600 hover:bg-purple-700 shadow-md">
+                <FileText className="h-3 w-3 mr-1" />
+                GCS RAG
+              </Badge>
+            )}
+            {isOriginal && (
+              <Badge variant="outline" className="text-xs border-blue-500/50 text-blue-600 bg-blue-50/50 dark:bg-blue-950/20">
+                Standard Analysis
+              </Badge>
+            )}
             {response.isFallback && (
               <Badge variant="outline" className="text-xs">Fallback</Badge>
             )}
@@ -96,7 +133,30 @@ function AIResponse({ response }) {
           />
         ) : (
           <div className="space-y-3">
-            {response.text.split('\n').map((line, idx) => {
+            {/* Use RAGHighlightedText for document-enhanced responses */}
+            {(() => {
+              console.log('[AIResponse] rendering decision:', {
+                isDocumentEnhanced,
+                ragUsed: response.ragUsed,
+                ragSourcesCount: response.ragSources?.length,
+                analysisType: response.analysisType,
+                shouldUseRAGComponent: isDocumentEnhanced && response.ragUsed
+              });
+              
+              if (isDocumentEnhanced && response.ragUsed) {
+                console.log('[OK] Using RAGHighlightedText component');
+                return (
+                  <div className="text-sm leading-relaxed">
+                    <RAGHighlightedText 
+                      text={response.text} 
+                      ragSources={response.ragSources || []} 
+                    />
+                  </div>
+                );
+              } else {
+                console.log('[OK] Using standard text rendering');
+                /* Standard text rendering for original responses */
+                return response.text.split('\n').map((line, idx) => {
               if (!line.trim()) return null;
               
               // Check if it's a header
@@ -124,7 +184,9 @@ function AIResponse({ response }) {
                   {line}
                 </p>
               );
-            })}
+                });
+              }
+            })()}
           </div>
         )}
         
@@ -137,139 +199,28 @@ function AIResponse({ response }) {
           </div>
         )}
         
-        {/* Room Context Summary */}
-        {response.roomContext && (
-          <div className="mt-4 p-3 bg-muted rounded-lg">
+        {/* RAG Sources Display - Only for document-enhanced analysis */}
+        {isDocumentEnhanced && response.ragSources && response.ragSources.length > 0 && (
+          <div className="mt-4 p-3 bg-purple-950/20 border border-purple-500/30 rounded-lg">
             <div className="flex items-center gap-2 mb-2">
-              <Sparkles className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs font-medium text-muted-foreground">Meeting Context</span>
+              <FileText className="h-4 w-4 text-purple-400" />
+              <span className="text-xs font-medium text-purple-300">Supported by Documents from GCS</span>
             </div>
-            <div className="flex flex-wrap gap-1">
-              {response.roomContext.meetingType && (
-                <Badge variant="outline" className="text-xs">
-                  {response.roomContext.meetingType}
+            <div className="space-y-1">
+              {response.ragSources.map((source, idx) => (
+                <div key={idx} className="flex items-center justify-between text-xs">
+                  <span className="text-purple-200 font-mono">{source.filename}</span>
+                  <Badge variant="outline" className="text-xs border-purple-500/50 text-purple-300">
+                    {source.similarity}% match
                 </Badge>
-              )}
-              {response.roomContext.participants?.slice(0, 3).map((participant, idx) => (
-                <Badge key={idx} variant="secondary" className="text-xs">
-                  {participant}
-                </Badge>
+                </div>
               ))}
-              {response.roomContext.participants?.length > 3 && (
-                <Badge variant="secondary" className="text-xs">
-                  +{response.roomContext.participants.length - 3} more
-                </Badge>
-              )}
             </div>
           </div>
         )}
         
-        {/* Tags Display */}
-        {response.tagMetadata && response.tagMetadata.length > 0 && (
-          <div className="mt-4 p-3 bg-muted rounded-lg">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-medium text-muted-foreground">Tags</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {response.tagMetadata.map((tag, idx) => (
-                <Badge 
-                  key={idx} 
-                  variant="outline" 
-                  className="text-xs"
-                  style={{ 
-                    borderColor: tag.color || '#888888',
-                    color: tag.color || '#888888'
-                  }}
-                >
-                  {tag.icon && <span className="mr-1">{tag.icon}</span>}
-                  {tag.category}:{tag.value}
-                </Badge>
-              ))}
-            </div>
-          </div>
-        )}
       </CardContent>
       
-      {/* Enhanced styling for formatted responses */}
-      <style jsx global>{`
-        .ai-response-content {
-          font-size: 0.875rem;
-          line-height: 1.6;
-        }
-        
-        .ai-response-content .ai-analysis {
-          display: flex;
-          flex-direction: column;
-          gap: 1rem;
-        }
-        
-        .ai-response-content .agent-header {
-          font-weight: 600;
-          color: var(--primary);
-          margin-bottom: 0.75rem;
-          padding-bottom: 0.5rem;
-          border-bottom: 1px solid var(--border);
-        }
-        
-        .ai-response-content .analysis-section {
-          padding: 0.75rem;
-          background: var(--muted);
-          border-radius: 0.5rem;
-          margin-bottom: 0.75rem;
-        }
-        
-        .ai-response-content .section-header {
-          font-weight: 600;
-          margin-bottom: 0.5rem;
-          color: var(--foreground);
-        }
-        
-        .ai-response-content .bullet-item {
-          display: flex;
-          align-items: baseline;
-          gap: 0.5rem;
-          margin-bottom: 0.25rem;
-        }
-        
-        .ai-response-content .bullet {
-          color: var(--muted-foreground);
-          flex-shrink: 0;
-        }
-        
-        .ai-response-content .bullet-label {
-          font-weight: 500;
-          color: var(--foreground);
-        }
-        
-        .ai-response-content .bullet-value {
-          color: var(--muted-foreground);
-        }
-        
-        .ai-response-content .bullet-text {
-          color: var(--foreground);
-        }
-        
-        .ai-response-content strong {
-          font-weight: 600;
-          color: var(--foreground);
-        }
-        
-        .ai-response-content code {
-          padding: 0.125rem 0.25rem;
-          background: var(--muted);
-          border-radius: 0.25rem;
-          font-family: monospace;
-          font-size: 0.8rem;
-        }
-        
-        .ai-response-content p {
-          margin-bottom: 0.5rem;
-        }
-        
-        .ai-response-content p:last-child {
-          margin-bottom: 0;
-        }
-      `}</style>
     </Card>
   );
 }

@@ -27,6 +27,7 @@ const TranscriptionRoom = ({ initialService }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [aiResponses, setAiResponses] = useState([]);
+  const processedBlocksRef = useRef(new Set()); // Track blocks that have triggered AI analysis
   const [isAiThinking, setIsAiThinking] = useState(false);
   const socketRef = useRef();
   const audioContextRef = useRef(null);
@@ -43,6 +44,29 @@ const TranscriptionRoom = ({ initialService }) => {
   const [currentStep, setCurrentStep] = useState('provider'); // 'provider', 'recording', 'transcribing'
   const [isProviderLocked, setIsProviderLocked] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
+  const [useRAG, setUseRAG] = useState(() => {
+    // Try to load from localStorage, default to false (Original)
+    try {
+      const saved = localStorage.getItem('ai_analysis_type');
+      return saved === 'rag';
+    } catch {
+      return false;
+    }
+  }); // false = Original only, true = Document-Enhanced only
+  
+  // Use ref to always have current useRAG value (avoids closure issues)
+  const useRAGRef = useRef(useRAG);
+  
+  // Update ref when state changes
+  useEffect(() => {
+    useRAGRef.current = useRAG;
+    try {
+      localStorage.setItem('ai_analysis_type', useRAG ? 'rag' : 'original');
+      console.log(`[CLIENT] Saved analysis type preference: ${useRAG ? 'Document-Enhanced' : 'Original'}`);
+    } catch (err) {
+      console.warn('Failed to save analysis type preference:', err);
+    }
+  }, [useRAG]);
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -72,6 +96,9 @@ const TranscriptionRoom = ({ initialService }) => {
   const [chunksPerSec, setChunksPerSec] = useState(0);
   const [dgMetadata, setDgMetadata] = useState(null);
   const [avgLatencyMs, setAvgLatencyMs] = useState(0);
+  const [ragAuthenticated, setRagAuthenticated] = useState(() => {
+    return localStorage.getItem('rag_authenticated') === 'true';
+  });
   const debugStatsRef = useRef({ bytesSent: 0, lastBytes: 0, chunksSent: 0, lastChunks: 0, interimCount: 0, finalCount: 0, lastTick: Date.now(), lastEmitTs: 0, latencies: [] });
 
   const [debugSettings, setDebugSettings] = useState({
@@ -253,13 +280,31 @@ const TranscriptionRoom = ({ initialService }) => {
               setTimeout(() => setHistoryStage('warn'), 1500);
               // Trigger AI analysis for this finalized block
               try {
+                // Prevent duplicate AI analysis for the same block
+                if (!processedBlocksRef.current.has(newId)) {
+                  processedBlocksRef.current.add(newId);
+                  // Use ref to get current value (avoids closure stale value issue)
+                  const currentUseRAG = useRAGRef.current;
+                  // Use socket ID directly as roomId (more reliable than state)
+                  const currentRoomId = socketRef.current?.id || roomId;
+                  console.log(`[CLIENT] Emitting process_with_ai event for block ${newId}`);
+                  console.log(`   Text length: ${(prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim().length} chars`);
+                  console.log(`   Agent: ${selectedAgent}`);
+                  console.log(`   RoomId: ${currentRoomId || 'EMPTY!'}`);
+                  console.log(`   useRAG: ${currentUseRAG} (${currentUseRAG ? 'Document-Enhanced' : 'Original'})`);
                 socketRef.current.emit('process_with_ai', { 
                   text: (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim(),
-                  roomId,
+                  roomId: currentRoomId, // Use socket ID directly
                   agentType: selectedAgent,
-                  blockId: newId
+                  blockId: newId,
+                  useRAG: Boolean(currentUseRAG) // Use ref value to ensure current state
                 });
-              } catch (_) {}
+                } else {
+                  console.log(`[CLIENT] Skipping duplicate analysis for block ${newId}`);
+                }
+              } catch (err) {
+                console.error(`[X] [CLIENT] Error emitting process_with_ai:`, err);
+              }
               return next;
             });
           }
@@ -309,41 +354,75 @@ const TranscriptionRoom = ({ initialService }) => {
       debugStatsRef.current.lastTick = now;
     }, 1000);
 
-    // Set up interval for processing accumulated transcripts
-    const analysisInterval = setInterval(() => {
-      setCurrentSegment(prev => {
-        if (prev.text.trim()) {
-          processTranscriptionWithAI(prev.text);
-          return { text: '', startTime: null, timeLeft: 20 };
-        }
-        return prev;
-      });
-    }, ANALYSIS_INTERVAL);
+    // DISABLED: Interval-based processing to prevent duplicate analysis
+    // AI analysis now happens immediately when finalized blocks are created (line 256)
+    // This prevents duplicate calls and ensures RAG integration works correctly
+    const analysisInterval = null; // Disabled to prevent duplicate analysis
+    // const analysisInterval = setInterval(() => {
+    //   setCurrentSegment(prev => {
+    //     if (prev.text.trim()) {
+    //       processTranscriptionWithAI(prev.text);
+    //       return { text: '', startTime: null, timeLeft: 20 };
+    //     }
+    //     return prev;
+    //   });
+    // }, ANALYSIS_INTERVAL);
 
     socketRef.current.on('ai_response', (response) => {
+      console.log(`[CLIENT] Received ai_response:`, response);
+      console.log(`   Analysis Type: ${response.analysisType}`);
+      console.log(`   RAG Used: ${response.ragUsed}`);
+      console.log(`   RAG Sources: ${response.ragSources?.length || 0}`);
+      console.log(`   BlockId: ${response.blockId}`);
+      
       // Attach response to a specific block if blockId is provided
       if (response.blockId) {
-        setTranscriptBlocks(prev => prev.map(b => (
-          b.id === response.blockId
-            ? { ...b, ai: { 
+        // Handle RAG responses with -rag suffix
+        const isRagResponse = response.blockId.endsWith('-rag');
+        const originalBlockId = isRagResponse ? response.blockId.replace(/-rag$/, '') : response.blockId;
+        
+        const aiResponseData = {
                 text: response.text,
-                timestamp: new Date().toISOString(),
+          timestamp: response.timestamp || new Date().toISOString(),
                 isError: response.isError,
                 agent: response.agent,
                 roomContext: response.roomContext,
-                isFormatted: response.isFormatted
-              } }
-            : b
-        )));
+          isFormatted: response.isFormatted,
+          analysisType: response.analysisType,
+          ragUsed: response.ragUsed,
+          ragSources: response.ragSources,
+          ragTag: response.ragTag,
+          tags: response.tags,
+          tagMetadata: response.tagMetadata
+        };
+        
+        setTranscriptBlocks(prev => prev.map(b => {
+          if (b.id === originalBlockId) {
+            if (isRagResponse) {
+              // Store RAG response separately
+              return { ...b, aiRag: aiResponseData };
+            } else {
+              // Store original response
+              return { ...b, ai: aiResponseData };
+            }
+          }
+          return b;
+        }));
       } else {
         setAiResponses(prev => [...prev, {
           text: response.text,
-          timestamp: new Date().toISOString(),
+          timestamp: response.timestamp || new Date().toISOString(),
           isError: response.isError,
           isMock: response.isMock,
           agent: response.agent,
           roomContext: response.roomContext,
-          isFormatted: response.isFormatted
+          isFormatted: response.isFormatted,
+          analysisType: response.analysisType,
+          ragUsed: response.ragUsed,
+          ragSources: response.ragSources,
+          ragTag: response.ragTag,
+          tags: response.tags,
+          tagMetadata: response.tagMetadata
         }]);
       }
       setIsAiThinking(false);
@@ -361,7 +440,7 @@ const TranscriptionRoom = ({ initialService }) => {
     return () => {
       cleanupAudioContext();
       clearInterval(countdownInterval);
-      clearInterval(analysisInterval);
+      if (analysisInterval) clearInterval(analysisInterval); // Safely clear if exists
       clearInterval(dbgTicker);
       if (socketRef.current) {
         window.history.pushState({}, '', '/');
@@ -918,6 +997,7 @@ const TranscriptionRoom = ({ initialService }) => {
               roomContext={roomContext}
               socket={socketRef.current}
               roomId={roomId}
+              onRAGAuthChange={setRagAuthenticated}
             />
           </div>
         </div>
@@ -1144,15 +1224,32 @@ const TranscriptionRoom = ({ initialService }) => {
                         </div>
                       </div>
                     )}
-                    <label className="flex items-center gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={isAutoScrollEnabled}
-                        onChange={(e) => setIsAutoScrollEnabled(e.target.checked)}
-                        className="rounded border-gray-300"
-                      />
-                      <span className="text-sm text-muted-foreground">Auto Scroll</span>
-                    </label>
+                    <div className="flex items-center gap-4">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isAutoScrollEnabled}
+                          onChange={(e) => setIsAutoScrollEnabled(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span className="text-sm text-muted-foreground">Auto Scroll</span>
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-muted-foreground">AI Analysis:</span>
+                        <select
+                          value={useRAG ? 'rag' : 'original'}
+                          onChange={(e) => {
+                            const newValue = e.target.value === 'rag';
+                            console.log(`[CLIENT] Changing analysis type: ${newValue ? 'Document-Enhanced' : 'Original'}`);
+                            setUseRAG(newValue);
+                          }}
+                          className="text-sm bg-background border border-border rounded px-2 py-1 cursor-pointer"
+                        >
+                          <option value="original">Original</option>
+                          <option value="rag">Document-Enhanced</option>
+                        </select>
+                      </div>
+                    </div>
                   </div>
                 </div>
                 <CardDescription>
@@ -1165,15 +1262,27 @@ const TranscriptionRoom = ({ initialService }) => {
                 <ScrollArea className="h-[calc(100vh-16rem)]" ref={aiResponsesRef}>
                   {(() => {
                     const idx = historyIdx ?? (transcriptBlocks.length - 1);
-                    const ai = transcriptBlocks[idx]?.ai;
-                    if (ai) {
+                    const block = transcriptBlocks[idx];
+                    const ai = block?.ai;
+                    const aiRag = block?.aiRag;
+                    
+                    if (ai || aiRag) {
                       return (
                         <div className="space-y-4">
+                          {ai && (
                           <Card>
                             <CardContent className="pt-6">
                               <AIResponse response={ai} />
                             </CardContent>
                           </Card>
+                          )}
+                          {aiRag && ragAuthenticated && (
+                            <Card>
+                              <CardContent className="pt-6">
+                                <AIResponse response={aiRag} />
+                              </CardContent>
+                            </Card>
+                          )}
                         </div>
                       );
                     }
@@ -1184,13 +1293,35 @@ const TranscriptionRoom = ({ initialService }) => {
                         </div>
                       ) : (
                         <div className="space-y-4">
-                          {aiResponses.map((response, index) => (
+                          {(() => {
+                            const filtered = aiResponses.filter(response => {
+                              // Hide Document-Enhanced responses if not authenticated
+                              if (response.analysisType === 'document-enhanced' && !ragAuthenticated) {
+                                return false;
+                              }
+                              // Filter by selected analysis type
+                              if (useRAG && response.analysisType !== 'document-enhanced') {
+                                console.log(`[CLIENT] Filtering out ${response.analysisType} response (user wants Document-Enhanced)`);
+                                return false; // User wants Document-Enhanced, hide Original
+                              }
+                              if (!useRAG && response.analysisType !== 'original') {
+                                console.log(`[CLIENT] Filtering out ${response.analysisType} response (user wants Original)`);
+                                return false; // User wants Original, hide Document-Enhanced
+                              }
+                              return true;
+                            });
+                            console.log(`[CLIENT] Filtered responses: ${filtered.length} of ${aiResponses.length} (useRAG=${useRAG})`);
+                            return filtered;
+                          })()
+                            .map((response, index) => {
+                            return (
                             <Card key={index}>
                               <CardContent className="pt-6">
                                 <AIResponse response={response} />
                               </CardContent>
                             </Card>
-                          ))}
+                            );
+                          })}
                         </div>
                       )
                     );
