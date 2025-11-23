@@ -7,12 +7,8 @@ import {
   X, 
   Lock, 
   Bot, 
-  Users, 
   Brain, 
-  ListChecks,
-  Building2,
   Info,
-  ChevronRight,
   FileText,
   Database,
   RefreshCw,
@@ -29,39 +25,9 @@ const AI_AGENTS = [
     icon: Bot,
     color: 'text-blue-600',
     features: ['Action items', 'Key decisions', 'Team dynamics', 'Meeting summaries']
-  },
-  {
-    id: 'ONBOARDING_ASSISTANT',
-    name: 'Onboarding Assistant',
-    description: 'Helps new team members understand context and team structure',
-    icon: Users,
-    color: 'text-green-600',
-    features: ['Term explanations', 'Team introductions', 'Learning resources', 'Next steps']
-  },
-  {
-    id: 'TECHNICAL_ARCHITECT',
-    name: 'Technical Architect',
-    description: 'Focuses on technical decisions, architecture, and best practices',
-    icon: Brain,
-    color: 'text-purple-600',
-    features: ['Architecture review', 'Tech recommendations', 'Risk assessment', 'Best practices']
-  },
-  {
-    id: 'ACTION_TRACKER',
-    name: 'Action Tracker',
-    description: 'Tracks action items, decisions, and commitments',
-    icon: ListChecks,
-    color: 'text-orange-600',
-    features: ['Action items', 'Decision tracking', 'Blockers', 'Commitments']
-  },
-  {
-    id: 'SPOKEN_RESPONDER',
-    name: 'Speaker Coach',
-    description: 'Generates one-paragraph, human-sounding replies you can read aloud',
-    icon: Bot,
-    color: 'text-amber-600',
-    features: ['Single paragraph', 'Human tone', 'Conversation flow']
   }
+  // Other agents (ONBOARDING_ASSISTANT, TECHNICAL_ARCHITECT, ACTION_TRACKER, SPOKEN_RESPONDER) 
+  // are kept in backend but hidden from UI
 ];
 
 function Settings({ 
@@ -231,8 +197,8 @@ function Settings({
   const tabs = [
     { id: 'provider', label: 'Speech Provider', icon: SettingsIcon },
     { id: 'agent', label: 'AI Agent', icon: Bot },
-    { id: 'context', label: 'Team Context', icon: Building2 },
     { id: 'documents', label: 'Documents', icon: FileText }
+    // Team Context tab removed from UI but logic kept in backend
   ];
 
   return (
@@ -417,130 +383,19 @@ function Settings({
                     <div className="flex items-start gap-2">
                       <Info className="h-4 w-4 text-muted-foreground mt-0.5" />
                       <div className="text-sm text-muted-foreground">
-                        <p className="font-medium mb-1">Pro tip:</p>
-                        <ul className="space-y-1 ml-4">
-                          <li>• Use <strong>Meeting Analyst</strong> for general team meetings</li>
-                          <li>• Switch to <strong>Onboarding Assistant</strong> when training new members</li>
-                          <li>• Use <strong>Technical Architect</strong> for design discussions</li>
-                          <li>• Enable <strong>Action Tracker</strong> for planning sessions</li>
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-                </>
-              )}
-
-              {/* Team Context Tab */}
-              {activeTab === 'context' && (
-                <>
-                  <CardDescription className="mb-6">
-                    Current meeting context and team information
-                  </CardDescription>
-                  
-                  {teamContext ? (
-                    <div className="space-y-4">
-                      {/* Meeting Type */}
-                      <div className="p-4 bg-muted rounded-lg">
-                        <h4 className="font-medium flex items-center gap-2 mb-2">
-                          <Bot className="h-4 w-4" />
-                          Meeting Type
-                        </h4>
-                        <Badge variant="outline" className="capitalize">
-                          {teamContext.meetingType || 'General Meeting'}
-                        </Badge>
-                      </div>
-
-                      {/* Participants */}
-                      {teamContext.participants && teamContext.participants.length > 0 && (
-                        <div className="p-4 bg-muted rounded-lg">
-                          <h4 className="font-medium flex items-center gap-2 mb-2">
-                            <Users className="h-4 w-4" />
-                            Participants Mentioned
-                          </h4>
-                          <div className="flex flex-wrap gap-2">
-                            {teamContext.participants.map((participant, idx) => (
-                              <Badge key={idx} variant="secondary">
-                                {participant}
-                              </Badge>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Topics */}
-                      {teamContext.topics && teamContext.topics.length > 0 && (
-                        <div className="p-4 bg-muted rounded-lg">
-                          <h4 className="font-medium flex items-center gap-2 mb-2">
-                            <Brain className="h-4 w-4" />
-                            Technologies & Topics
-                          </h4>
-                          <div className="flex flex-wrap gap-2">
-                            {teamContext.topics.map((topic, idx) => (
-                              <Badge key={idx} variant="outline">
-                                {topic}
-                              </Badge>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Projects */}
-                      {teamContext.projectsMentioned && teamContext.projectsMentioned.length > 0 && (
-                        <div className="p-4 bg-muted rounded-lg">
-                          <h4 className="font-medium flex items-center gap-2 mb-2">
-                            <Building2 className="h-4 w-4" />
-                            Projects Mentioned
-                          </h4>
-                          <div className="flex flex-wrap gap-2">
-                            {teamContext.projectsMentioned.map((project, idx) => (
-                              <Badge key={idx} variant="default">
-                                {project}
-                              </Badge>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Recent Action Items */}
-                      {teamContext.actionItems && teamContext.actionItems.length > 0 && (
-                        <div className="p-4 bg-muted rounded-lg">
-                          <h4 className="font-medium flex items-center gap-2 mb-2">
-                            <ListChecks className="h-4 w-4" />
-                            Recent Action Items
-                          </h4>
-                          <ul className="space-y-2">
-                            {teamContext.actionItems.map((item, idx) => (
-                              <li key={idx} className="flex items-start gap-2 text-sm">
-                                <ChevronRight className="h-4 w-4 text-muted-foreground mt-0.5" />
-                                <span>{item.text}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <p>No meeting context available yet.</p>
-                      <p className="text-sm mt-2">Context will appear once the meeting starts.</p>
-                    </div>
-                  )}
-
-                  <div className="mt-6 p-4 bg-blue-50 dark:bg-blue-950/20 rounded-lg">
-                    <div className="flex items-start gap-2">
-                      <Info className="h-4 w-4 text-blue-600 dark:text-blue-400 mt-0.5" />
-                      <div className="text-sm text-blue-900 dark:text-blue-100">
-                        <p className="font-medium mb-1">About Team Context</p>
+                        <p className="font-medium mb-1">About Meeting Analyst:</p>
                         <p>
-                          The AI automatically identifies team members, projects, and technologies 
-                          mentioned during your meeting. This helps provide more accurate and 
-                          relevant analysis based on your organization's specific context.
+                          Meeting Analyst provides comprehensive analysis of your conversations, 
+                          identifying key decisions, action items, and team dynamics to help you 
+                          stay organized and productive.
                         </p>
                       </div>
                     </div>
                   </div>
                 </>
               )}
+
+              {/* Team Context Tab - Removed from UI but logic kept in backend */}
 
               {/* Documents Tab */}
               {activeTab === 'documents' && (
