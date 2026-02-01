@@ -1,0 +1,268 @@
+.conversation-flow-infographic {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: rgba(10, 10, 30, 0.3);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* Flow Timeline Container */
+.flow-timeline-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  scroll-behavior: smooth; /* ✅ Smooth auto-scroll */
+}
+
+.flow-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: center;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.empty-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.3);
+  margin-top: 8px;
+}
+
+/* Flow Steps */
+.flow-steps {
+  max-width: 700px;
+  margin: 0 auto;
+}
+
+.flow-step-container {
+  position: relative;
+  margin-bottom: 0;
+}
+
+/* Semantic Link Indicator (when turn relates to non-adjacent previous turn) */
+.semantic-link-indicator {
+  padding: 6px 12px;
+  margin: 8px 0 8px 40px;
+  background: rgba(100, 100, 200, 0.1);
+  border-left: 2px solid rgba(100, 150, 255, 0.4);
+  border-radius: 4px;
+  font-size: 11px;
+  color: rgba(150, 180, 255, 0.8);
+}
+
+.link-text {
+  font-style: italic;
+}
+
+/* Connection Line Between Cards */
+.flow-connector {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.connector-line {
+  width: 3px;
+  height: 20px;
+  background: linear-gradient(to bottom, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.1));
+}
+
+.connector-arrow {
+  font-size: 16px;
+  color: rgba(255, 255, 255, 0.4);
+  margin-top: -4px;
+}
+
+/* Flow Card */
+.flow-card {
+  position: relative;
+  padding: 16px 20px;
+  background: rgba(30, 30, 50, 0.8);
+  border-radius: 12px;
+  border-left: 4px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  transition: all 0.3s ease;
+}
+
+.flow-card:hover {
+  transform: translateX(4px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+/* Card types by color */
+.flow-card-question {
+  border-left-color: #4A90E2;
+  background: linear-gradient(to right, rgba(74, 144, 226, 0.1), rgba(30, 30, 50, 0.8));
+}
+
+.flow-card-answer {
+  border-left-color: #50C878;
+  background: linear-gradient(to right, rgba(80, 200, 120, 0.1), rgba(30, 30, 50, 0.8));
+}
+
+.flow-card-proposal {
+  border-left-color: #F5A623;
+  background: linear-gradient(to right, rgba(245, 166, 35, 0.1), rgba(30, 30, 50, 0.8));
+}
+
+.flow-card-decision {
+  border-left-color: #BD10E0;
+  background: linear-gradient(to right, rgba(189, 16, 224, 0.1), rgba(30, 30, 50, 0.8));
+}
+
+.flow-card-action {
+  border-left-color: #E74C3C;
+  background: linear-gradient(to right, rgba(231, 76, 60, 0.1), rgba(30, 30, 50, 0.8));
+}
+
+.flow-card-explanation,
+.flow-card-statement {
+  border-left-color: #6C757D;
+  background: linear-gradient(to right, rgba(108, 117, 125, 0.1), rgba(30, 30, 50, 0.8));
+}
+
+/* Step Badge - Clean number only */
+.step-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  margin-bottom: 12px;
+}
+
+.step-number {
+  font-size: 16px;
+  font-weight: 700;
+  color: #fff;
+}
+
+/* Speaker */
+.flow-speaker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.speaker-icon {
+  font-size: 14px;
+}
+
+.speaker-name {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+/* Summary (Main Content) */
+.flow-summary {
+  font-size: 15px;
+  line-height: 1.6;
+  color: #fff;
+  margin-bottom: 12px;
+  font-weight: 400;
+}
+
+/* Topic Tags (AI-generated, showing what this turn covers) */
+.flow-topics {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.topics-label {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-right: 4px;
+}
+
+.topic-tag {
+  padding: 4px 10px;
+  background: rgba(100, 150, 255, 0.15);
+  border: 1px solid rgba(100, 150, 255, 0.3);
+  border-radius: 12px;
+  font-size: 11px;
+  color: #6b9dff;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+/* Removed completion badges and emoji states */
+
+/* Remove pattern summary - keep space clean */
+
+/* Responsive */
+@media (max-width: 768px) {
+  .flow-timeline-container {
+    padding: 12px;
+  }
+  
+  .flow-steps {
+    max-width: 100%;
+  }
+  
+  .flow-header {
+    gap: 8px;
+  }
+  
+  .header-metric {
+    font-size: 11px;
+  }
+}
+
+/* Animations */
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.flow-step-container {
+  animation: slideIn 0.4s ease-out;
+}
+
+/* Scrollbar Styling */
+.flow-timeline-container::-webkit-scrollbar {
+  width: 8px;
+}
+
+.flow-timeline-container::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.flow-timeline-container::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+}
+
+.flow-timeline-container::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+

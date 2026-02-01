@@ -30,6 +30,7 @@ const TranscriptionRoom = ({ initialService }) => {
   const processedBlocksRef = useRef(new Set()); // Track blocks that have triggered AI analysis
   const [isAiThinking, setIsAiThinking] = useState(false);
   const socketRef = useRef();
+  const serverUrlRef = useRef('http://localhost:5002'); // Store server URL for error messages
   const audioContextRef = useRef(null);
   const screenStreamRef = useRef(null);
   const lastAnalysisTimeRef = useRef(null);
@@ -70,7 +71,33 @@ const TranscriptionRoom = ({ initialService }) => {
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [roomId, setRoomId] = useState('');
+  // Generate a room ID immediately (will be replaced by socket ID when connected)
+  const generateRoomId = () => {
+    if (typeof window === 'undefined') return 'room-loading';
+    const saved = sessionStorage.getItem('desired_room_id');
+    if (saved && saved.trim() !== '') {
+      console.log('[Room ID] Using saved room ID:', saved);
+      return saved;
+    }
+    // Generate a more stable, production-ready room ID
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substr(2, 9);
+    const newId = `${timestamp}-${random}`;
+    try {
+      sessionStorage.setItem('desired_room_id', newId);
+      console.log('[Room ID] Generated new room ID:', newId);
+    } catch (err) {
+      console.warn('[Room ID] Failed to save to sessionStorage:', err);
+    }
+    return newId;
+  };
+  const [roomId, setRoomId] = useState(() => {
+    const id = generateRoomId();
+    console.log('[Room ID] Initial room ID state:', id);
+    return id;
+  });
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [connectionError, setConnectionError] = useState(null);
   const [transcriptBlocks, setTranscriptBlocks] = useState([]);
   const [currentBlock, setCurrentBlock] = useState({
     text: '',
@@ -215,10 +242,19 @@ const TranscriptionRoom = ({ initialService }) => {
       return () => window.removeEventListener('keydown', handler);
     }
 
-    const inferredUrl = (typeof window !== 'undefined' && window.location && window.location.origin) ? window.location.origin : undefined;
-    const serverUrl = process.env.PUBLIC_SERVER_URL || process.env.REACT_APP_SERVER_URL || inferredUrl || 'http://localhost:5002';
+    // Always use explicit server URL - don't infer from current page (which might be React dev server on 3000)
+    // The server is always on port 5002, not the same port as the React app
+    const serverUrl = process.env.PUBLIC_SERVER_URL || process.env.REACT_APP_SERVER_URL || 'http://localhost:5002';
+    serverUrlRef.current = serverUrl; // Update ref for error handlers
+    console.log('[Socket] Connecting to server:', serverUrl);
+    
     socketRef.current = io(serverUrl, {
       autoConnect: true,
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: 5,
+      timeout: 10000,
       query: {
         desiredRoomId: (typeof window !== 'undefined' && sessionStorage.getItem('desired_room_id')) || ''
       }
@@ -226,9 +262,82 @@ const TranscriptionRoom = ({ initialService }) => {
 
     socketRef.current.on('connect', () => {
       const socketId = socketRef.current.id;
+      console.log('[Socket] ✅ Connected with ID:', socketId);
+      console.log('[Room ID] Setting room ID to socket ID:', socketId);
+      setSocketConnected(true);
+      setConnectionError(null);
       setRoomId(socketId);
-      try { sessionStorage.setItem('desired_room_id', socketId); } catch (_) {}
+      try { 
+        sessionStorage.setItem('desired_room_id', socketId);
+        console.log('[Room ID] Saved socket ID to sessionStorage');
+      } catch (err) {
+        console.warn('[Room ID] Failed to save socket ID:', err);
+      }
       window.history.pushState({}, '', `/${socketId}`);
+    });
+    
+    // Listen for room_alias event from server (if desiredRoomId was provided)
+    socketRef.current.on('room_alias', ({ roomId: aliasRoomId }) => {
+      console.log('[Room ID] Server assigned room alias:', aliasRoomId);
+      if (aliasRoomId && aliasRoomId !== roomId) {
+        setRoomId(aliasRoomId);
+        try {
+          sessionStorage.setItem('desired_room_id', aliasRoomId);
+        } catch (_) {}
+      }
+    });
+
+    socketRef.current.on('connect_error', (error) => {
+      console.error('[Socket] ❌ Connection error:', error);
+      console.error('[Socket] Error details:', {
+        message: error.message,
+        type: error.type,
+        description: error.description
+      });
+      setSocketConnected(false);
+      const currentServerUrl = serverUrlRef.current || 'http://localhost:5002';
+      setConnectionError(`Cannot connect to server at ${currentServerUrl}. Make sure the server is running on port 5002.`);
+      
+      // Only use temporary room ID if we don't have a saved one
+      const savedRoomId = sessionStorage.getItem('desired_room_id');
+      if (!savedRoomId || savedRoomId.startsWith('temp-')) {
+        const tempRoomId = `temp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        setRoomId(tempRoomId);
+        console.warn('[Socket] Using temporary room ID:', tempRoomId);
+      } else {
+        // Keep using saved room ID even if connection fails
+        console.warn('[Socket] Keeping saved room ID:', savedRoomId);
+      }
+    });
+    
+    socketRef.current.on('reconnect', (attemptNumber) => {
+      console.log('[Socket] ✅ Reconnected after', attemptNumber, 'attempts');
+      setSocketConnected(true);
+      setConnectionError(null);
+    });
+    
+    socketRef.current.on('reconnect_attempt', (attemptNumber) => {
+      console.log('[Socket] 🔄 Reconnection attempt', attemptNumber);
+      const currentServerUrl = serverUrlRef.current || 'http://localhost:5002';
+      setConnectionError(`Reconnecting to ${currentServerUrl}... (attempt ${attemptNumber})`);
+    });
+    
+    socketRef.current.on('reconnect_failed', () => {
+      console.error('[Socket] ❌ Reconnection failed after all attempts');
+      const currentServerUrl = serverUrlRef.current || 'http://localhost:5002';
+      setConnectionError(`Failed to connect to server at ${currentServerUrl}. Please check if the server is running on port 5002.`);
+    });
+
+    socketRef.current.on('disconnect', (reason) => {
+      console.warn('[Socket] Disconnected:', reason);
+      setSocketConnected(false);
+      if (reason === 'io server disconnect') {
+        setConnectionError('Server disconnected. Please refresh the page.');
+      } else if (reason === 'io client disconnect') {
+        // Client initiated disconnect, don't show error
+      } else {
+        setConnectionError('Connection lost. Attempting to reconnect...');
+      }
     });
 
     // Timer for countdown
@@ -948,12 +1057,48 @@ const TranscriptionRoom = ({ initialService }) => {
   return (
     <div className="min-h-screen bg-background p-4 lg:p-6">
       <div className="max-w-[1600px] mx-auto">
+        {/* Connection Status Banner */}
+        {connectionError && !socketConnected && (
+          <div className="mb-4 p-3 bg-orange-500/10 border border-orange-500/20 rounded-lg flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-orange-500">⚠️</span>
+              <span className="text-sm text-orange-700 dark:text-orange-400">
+                {connectionError}
+              </span>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (socketRef.current) {
+                  socketRef.current.disconnect();
+                  socketRef.current.connect();
+                }
+              }}
+            >
+              Retry Connection
+            </Button>
+          </div>
+        )}
         {/* Header: Enterprise quick polish */}
         <div className="flex items-center justify-between mb-6 py-2">
           <div className="flex items-center gap-4">
             <div>
               <div className="text-lg font-semibold tracking-tight">ASR SyncScribe</div>
-              <div className="text-xs text-muted-foreground">Room • {roomId || '—'}</div>
+              <div className="text-xs text-muted-foreground">
+                Room • {(() => {
+                  const displayId = roomId || socketRef.current?.id || 'Connecting...';
+                  // Truncate long IDs for display
+                  const truncated = displayId.length > 20 ? displayId.substring(0, 20) + '...' : displayId;
+                  return truncated;
+                })()}
+                {!socketConnected && (
+                  <span className="ml-2 text-orange-500">⚠️</span>
+                )}
+                {socketConnected && (
+                  <span className="ml-2 text-green-500">●</span>
+                )}
+              </div>
             </div>
             <div className="hidden md:flex items-center gap-2 pl-4 border-l border-border/60">
               <Badge variant="secondary">
