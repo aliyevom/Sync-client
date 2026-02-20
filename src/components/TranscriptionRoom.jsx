@@ -137,6 +137,7 @@ const TranscriptionRoom = ({ initialService }) => {
   const sessionTimerRef = useRef(null);
   const [sessionElapsedMs, setSessionElapsedMs] = useState(0);
   const [linkCopied, setLinkCopied] = useState(false);
+  const [transcriptCopied, setTranscriptCopied] = useState(false);
   const [debugPanelOpen, setDebugPanelOpen] = useState(false);
   const [audioLevel, setAudioLevel] = useState(0);
   const [audioKbps, setAudioKbps] = useState(0);
@@ -898,6 +899,39 @@ const TranscriptionRoom = ({ initialService }) => {
     saveAs(blob, `transcript-${roomId}-${new Date().toLocaleDateString()}.txt`);
   };
 
+  const copyTranscript = async () => {
+    // Combine all completed blocks and current block
+    const allBlocks = [...transcriptBlocks];
+    if (currentBlock.text) {
+      allBlocks.push(currentBlock);
+    }
+    
+    const text = allBlocks.map(block => block.text).join('\n\n');
+    
+    try {
+      await navigator.clipboard.writeText(text);
+      setTranscriptCopied(true);
+      setTimeout(() => setTranscriptCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy transcript:', err);
+      // Fallback for older browsers
+      const textArea = document.createElement('textarea');
+      textArea.value = text;
+      textArea.style.position = 'fixed';
+      textArea.style.opacity = '0';
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        setTranscriptCopied(true);
+        setTimeout(() => setTranscriptCopied(false), 2000);
+      } catch (fallbackErr) {
+        console.error('Fallback copy also failed:', fallbackErr);
+      }
+      document.body.removeChild(textArea);
+    }
+  };
+
   useEffect(() => {
     if (!window.AudioContext) {
       console.warn('AudioContext is not supported in this browser');
@@ -1151,9 +1185,22 @@ const TranscriptionRoom = ({ initialService }) => {
               {linkCopied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}Copy Link
             </Button>
             {(transcriptBlocks.length > 0 || currentBlock.text) && (
-              <Button variant="outline" size="sm" onClick={exportTranscript}>
-                <Download className="h-4 w-4 mr-2" />Export
-              </Button>
+              <>
+                <Button variant="outline" size="sm" onClick={copyTranscript}>
+                  {transcriptCopied ? (
+                    <>
+                      <Check className="h-4 w-4 mr-2" />Copied
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-4 w-4 mr-2" />Copy
+                    </>
+                  )}
+                </Button>
+                <Button variant="outline" size="sm" onClick={exportTranscript}>
+                  <Download className="h-4 w-4 mr-2" />Export
+                </Button>
+              </>
             )}
             <Settings 
               selectedService={selectedService}
@@ -1355,13 +1402,30 @@ const TranscriptionRoom = ({ initialService }) => {
                   )}
                 </ScrollArea>
 
-                {/* Export Button */}
+                {/* Export and Copy Buttons */}
                 {(transcriptBlocks.length > 0 || currentBlock.text) && (
-                  <div className="mt-4">
+                  <div className="mt-4 flex gap-2">
+                    <Button 
+                      onClick={copyTranscript} 
+                      variant="secondary"
+                      className="flex-1"
+                    >
+                      {transcriptCopied ? (
+                        <>
+                          <Check className="h-4 w-4 mr-2" />
+                          Copied!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="h-4 w-4 mr-2" />
+                          Copy Transcript
+                        </>
+                      )}
+                    </Button>
                     <Button 
                       onClick={exportTranscript} 
                       variant="secondary"
-                      className="w-full"
+                      className="flex-1"
                     >
                       <Download className="h-4 w-4 mr-2" />
                       Export Transcript
