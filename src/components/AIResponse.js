@@ -2,9 +2,10 @@ import React, { useState } from 'react';
 import { Card, CardContent, CardHeader } from './ui/card';
 import { Badge } from './ui/badge';
 import { Button } from './ui/button';
-import { Bot, Copy, Check, Clock, AlertCircle, Users, Brain, ListChecks, FileText } from 'lucide-react';
+import { Bot, Copy, Check, Clock, AlertCircle, Users, Brain, ListChecks, FileText, Code2 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import RAGHighlightedText from './RAGHighlightedText';
+import { Highlight, themes } from 'prism-react-renderer';
 
 // Agent icon mapping
 const AGENT_ICONS = {
@@ -12,6 +13,7 @@ const AGENT_ICONS = {
   'Onboarding Assistant': Users,
   'Technical Architect': Brain,
   'Action Tracker': ListChecks,
+  'Speaker Coach': Code2,
   'System': AlertCircle
 };
 
@@ -20,21 +22,113 @@ const AGENT_COLORS = {
   'Onboarding Assistant': 'text-green-600',
   'Technical Architect': 'text-purple-600',
   'Action Tracker': 'text-orange-600',
+  'Speaker Coach': 'text-cyan-500',
   'System': 'text-gray-600'
 };
 
+// Inline code block component with syntax highlighting
+function CodeBlock({ code, language }) {
+  const [codeCopied, setCodeCopied] = useState(false);
+
+  const handleCodeCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCodeCopied(true);
+      setTimeout(() => setCodeCopied(false), 2000);
+    } catch (_) {}
+  };
+
+  const normalizedLang = (language || 'text').toLowerCase().replace(/^(js|jsx)$/, 'javascript').replace(/^(ts|tsx)$/, 'typescript');
+
+  return (
+    <div className="relative rounded-lg overflow-hidden my-3 border border-white/10 bg-[#0d1117] text-[13px] font-mono w-full min-w-0">
+      <div className="flex items-center justify-between px-4 py-1.5 bg-white/5 border-b border-white/10">
+        <span className="text-[11px] text-white/40 uppercase tracking-widest">{normalizedLang}</span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleCodeCopy}
+          className={cn("h-6 px-2 text-[11px] text-white/50 hover:text-white/90", codeCopied && "text-green-400")}
+        >
+          {codeCopied ? <><Check className="h-3 w-3 mr-1" />Copied</> : <><Copy className="h-3 w-3 mr-1" />Copy</>}
+        </Button>
+      </div>
+      <Highlight theme={themes.oneDark} code={code.trim()} language={normalizedLang}>
+        {({ className, style, tokens, getLineProps, getTokenProps }) => (
+          <pre className={cn(className, "overflow-x-auto p-4 leading-relaxed")} style={{ ...style, background: 'transparent', margin: 0 }}>
+            {tokens.map((line, i) => (
+              <div key={i} {...getLineProps({ line })}>
+                <span className="inline-block w-8 text-right mr-4 text-white/20 select-none text-[11px]">{i + 1}</span>
+                {line.map((token, key) => (
+                  <span key={key} {...getTokenProps({ token })} />
+                ))}
+              </div>
+            ))}
+          </pre>
+        )}
+      </Highlight>
+    </div>
+  );
+}
+
+// Parse a mixed text+code response into renderable segments
+function renderResponseText(text) {
+  if (!text) return null;
+
+  // Split on fenced code blocks: ```lang\n...\n```
+  const FENCE_RE = /```([^\n]*)\n([\s\S]*?)```/g;
+  const segments = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = FENCE_RE.exec(text)) !== null) {
+    // Prose before this code block
+    if (match.index > lastIndex) {
+      segments.push({ type: 'prose', content: text.slice(lastIndex, match.index) });
+    }
+    segments.push({ type: 'code', language: match[1].trim() || 'text', content: match[2] });
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining prose after last code block
+  if (lastIndex < text.length) {
+    segments.push({ type: 'prose', content: text.slice(lastIndex) });
+  }
+
+  if (segments.length === 0) {
+    segments.push({ type: 'prose', content: text });
+  }
+
+  return segments.map((seg, idx) => {
+    if (seg.type === 'code') {
+      return <CodeBlock key={idx} code={seg.content} language={seg.language} />;
+    }
+    // Render prose: split into paragraphs and bullet lines
+    return (
+      <div key={idx} className="space-y-2">
+        {seg.content.split('\n').map((line, li) => {
+          const trimmed = line.trim();
+          if (!trimmed) return null;
+          if (trimmed.startsWith('- ') || trimmed.startsWith('• ') || trimmed.match(/^\d+\.\s/)) {
+            return (
+              <div key={li} className="flex items-start gap-2 ml-2">
+                <span className="text-muted-foreground mt-0.5 select-none">•</span>
+                <span className="text-sm leading-relaxed">{trimmed.replace(/^[-•]\s+|^\d+\.\s+/, '')}</span>
+              </div>
+            );
+          }
+          if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
+            return <p key={li} className="text-sm font-semibold mt-3 mb-1">{trimmed.replace(/\*\*/g, '')}</p>;
+          }
+          return <p key={li} className="text-sm leading-relaxed">{trimmed}</p>;
+        })}
+      </div>
+    );
+  });
+}
+
 function AIResponse({ response }) {
   const [copied, setCopied] = useState(false);
-  
-  // Log the entire response object for debugging
-  console.log('[AIResponse] component received:', {
-    analysisType: response.analysisType,
-    ragUsed: response.ragUsed,
-    ragSources: response.ragSources,
-    hasText: !!response.text,
-    textLength: response.text?.length,
-    allKeys: Object.keys(response)
-  });
 
   const handleCopy = async () => {
     try {
@@ -60,26 +154,18 @@ function AIResponse({ response }) {
   
   const isDocumentEnhanced = response.analysisType === 'document-enhanced';
   const isOriginal = response.analysisType === 'original';
-  
-  console.log('[AIResponse] computed values:', {
-    isDocumentEnhanced,
-    isOriginal,
-    'response.analysisType': response.analysisType,
-    'response.ragUsed': response.ragUsed,
-    'condition (isDocumentEnhanced && response.ragUsed)': isDocumentEnhanced && response.ragUsed
-  });
 
     return (
     <Card className={cn(
-      "mb-6", // Increased spacing between cards from mb-4 to mb-6
+      "mb-6 min-w-0 overflow-hidden",
       response.isError && "border-destructive/50",
       response.isFallback && "border-yellow-500/50",
       isDocumentEnhanced && "border-purple-500 border-2 bg-gradient-to-br from-purple-950/10 to-purple-900/5 shadow-lg shadow-purple-500/20",
       isOriginal && "border-blue-500/40 border-2"
     )}>
       <CardHeader className="pb-3">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-start justify-between gap-2 flex-wrap min-w-0">
+          <div className="flex items-center gap-2 flex-wrap min-w-0">
             <AgentIcon className={cn("h-5 w-5", agentColor)} />
             <span className="font-semibold text-sm">
               {isDocumentEnhanced ? 'Document-Enhanced AI Analysis' : isOriginal ? 'Original AI Analysis' : response.agent || 'AI Analysis'}
@@ -133,60 +219,18 @@ function AIResponse({ response }) {
           />
         ) : (
           <div className="space-y-3">
-            {/* Use RAGHighlightedText for document-enhanced responses */}
-            {(() => {
-              console.log('[AIResponse] rendering decision:', {
-                isDocumentEnhanced,
-                ragUsed: response.ragUsed,
-                ragSourcesCount: response.ragSources?.length,
-                analysisType: response.analysisType,
-                shouldUseRAGComponent: isDocumentEnhanced && response.ragUsed
-              });
-              
-              if (isDocumentEnhanced && response.ragUsed) {
-                console.log('[OK] Using RAGHighlightedText component');
-                return (
-                  <div className="text-sm leading-relaxed">
-                    <RAGHighlightedText 
-                      text={response.text} 
-                      ragSources={response.ragSources || []} 
-                    />
-                  </div>
-                );
-              } else {
-                console.log('[OK] Using standard text rendering');
-                /* Standard text rendering for original responses */
-                return response.text.split('\n').map((line, idx) => {
-              if (!line.trim()) return null;
-              
-              // Check if it's a header
-              if (line.includes(':') && line.trim().endsWith(':')) {
-                return (
-                  <h3 key={idx} className="font-semibold text-sm mt-4 mb-2">
-                    {line}
-                  </h3>
-                );
-              }
-              
-              // Check if it's a bullet point
-              if (line.trim().startsWith('•') || line.trim().startsWith('-')) {
-                return (
-                  <div key={idx} className="flex items-start gap-2 ml-4">
-                    <span className="text-muted-foreground">•</span>
-                    <span className="text-sm">{line.substring(1).trim()}</span>
-        </div>
-    );
-              }
-              
-              // Regular paragraph
-              return (
-                <p key={idx} className="text-sm">
-                  {line}
-                </p>
-              );
-                });
-              }
-            })()}
+            {isDocumentEnhanced && response.ragUsed ? (
+              <div className="text-sm leading-relaxed">
+                <RAGHighlightedText 
+                  text={response.text} 
+                  ragSources={response.ragSources || []} 
+                />
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {renderResponseText(response.text)}
+              </div>
+            )}
           </div>
         )}
         
