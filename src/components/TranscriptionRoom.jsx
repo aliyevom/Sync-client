@@ -18,16 +18,23 @@ import {
   Copy,
   Check,
   Bug,
-  Activity
+  Activity,
+  Columns3,
+  ArrowLeft,
+  Terminal,
+  Network
 } from 'lucide-react';
 import AIResponse from './AIResponse';
 import Settings from './Settings/Settings.jsx';
+import CodeDeepDive from './CodeDeepDive';
+import SystemDesignViewer from './SystemDesignViewer';
 
 const TranscriptionRoom = ({ initialService }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [aiResponses, setAiResponses] = useState([]);
   const processedBlocksRef = useRef(new Set()); // Track blocks that have triggered AI analysis
+  const transcriptsByRoomClientRef = useRef([]); // Rolling recent block texts for system design context
   const [isAiThinking, setIsAiThinking] = useState(false);
   const socketRef = useRef();
   const serverUrlRef = useRef('http://localhost:5002'); // Store server URL for error messages
@@ -64,6 +71,42 @@ const TranscriptionRoom = ({ initialService }) => {
     }
   }); // false = Original only, true = Document-Enhanced only
   
+  // ── Code Deep Dive toggle ────────────────────────────────────────────────
+  const [isCodeDeepDiveEnabled, setIsCodeDeepDiveEnabled] = useState(() => {
+    try { return localStorage.getItem('code_deep_dive_enabled') !== 'false'; } catch { return true; }
+  });
+  const [codeDeepDiveResponses, setCodeDeepDiveResponses] = useState([]);
+  const isCodeDeepDiveEnabledRef = useRef(isCodeDeepDiveEnabled);
+
+  // ── System Design Viewer toggle ──────────────────────────────────────────
+  const [isSystemDesignEnabled, setIsSystemDesignEnabled] = useState(() => {
+    try { return localStorage.getItem('system_design_enabled') !== 'false'; } catch { return true; }
+  });
+  const [systemDesignResponses, setSystemDesignResponses] = useState([]);
+  const isSystemDesignEnabledRef = useRef(isSystemDesignEnabled);
+
+  // ── Full-view triple-panel mode ──────────────────────────────────────────
+  const [isFullView, setIsFullView] = useState(false);
+  // Index of the block shown in full-view (null = latest)
+  const [fullViewBlockIdx, setFullViewBlockIdx] = useState(null);
+
+  // When entering full view, snap to the latest block
+  const openFullView = () => {
+    setFullViewBlockIdx(transcriptBlocks.length > 0 ? transcriptBlocks.length - 1 : null);
+    setIsFullView(true);
+  };
+
+  // Persist to localStorage + keep refs in sync
+  useEffect(() => {
+    isCodeDeepDiveEnabledRef.current = isCodeDeepDiveEnabled;
+    try { localStorage.setItem('code_deep_dive_enabled', isCodeDeepDiveEnabled ? 'true' : 'false'); } catch (_) {}
+  }, [isCodeDeepDiveEnabled]);
+
+  useEffect(() => {
+    isSystemDesignEnabledRef.current = isSystemDesignEnabled;
+    try { localStorage.setItem('system_design_enabled', isSystemDesignEnabled ? 'true' : 'false'); } catch (_) {}
+  }, [isSystemDesignEnabled]);
+
   // Use ref to always have current useRAG value (avoids closure issues)
   const useRAGRef = useRef(useRAG);
   const isAiAnalysisEnabledRef = useRef(isAiAnalysisEnabled);
@@ -414,22 +457,45 @@ const TranscriptionRoom = ({ initialService }) => {
                   // Prevent duplicate AI analysis for the same block
                   if (!processedBlocksRef.current.has(newId)) {
                     processedBlocksRef.current.add(newId);
-                    // Use ref to get current value (avoids closure stale value issue)
                     const currentUseRAG = useRAGRef.current;
-                    // Use socket ID directly as roomId (more reliable than state)
                     const currentRoomId = socketRef.current?.id || roomId;
-                    console.log(`[CLIENT] Emitting process_with_ai event for block ${newId}`);
-                    console.log(`   Text length: ${(prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim().length} chars`);
-                    console.log(`   Agent: ${selectedAgent}`);
-                    console.log(`   RoomId: ${currentRoomId || 'EMPTY!'}`);
-                    console.log(`   useRAG: ${currentUseRAG} (${currentUseRAG ? 'Document-Enhanced' : 'Original'})`);
-                  socketRef.current.emit('process_with_ai', { 
-                    text: (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim(),
-                    roomId: currentRoomId, // Use socket ID directly
-                    agentType: selectedAgent,
-                    blockId: newId,
-                    useRAG: Boolean(currentUseRAG) // Use ref value to ensure current state
-                  });
+                    const blockText = (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim();
+
+                    // Keep rolling client-side transcript for system design context
+                    const clientHistory = transcriptsByRoomClientRef.current;
+                    clientHistory.push(blockText);
+                    if (clientHistory.length > 20) clientHistory.splice(0, clientHistory.length - 20);
+
+                    // ── Main AI analysis ──────────────────────────────────
+                    socketRef.current.emit('process_with_ai', { 
+                      text: blockText,
+                      roomId: currentRoomId,
+                      agentType: selectedAgent,
+                      blockId: newId,
+                      useRAG: Boolean(currentUseRAG)
+                    });
+
+                    // ── Code Deep Dive ────────────────────────────────────
+                    if (isCodeDeepDiveEnabledRef.current) {
+                      socketRef.current.emit('process_code_deep_dive', {
+                        text: blockText,
+                        roomId: currentRoomId,
+                        blockId: newId
+                      });
+                    }
+
+                    // ── System Design Viewer ──────────────────────────────
+                    if (isSystemDesignEnabledRef.current) {
+                      // Pass recent transcript blocks for cumulative context
+                      const recentBlocks = transcriptsByRoomClientRef.current || [];
+                      socketRef.current.emit('process_system_design', {
+                        text: blockText,
+                        roomId: currentRoomId,
+                        blockId: newId,
+                        recentBlocks
+                      });
+                    }
+
                   } else {
                     console.log(`[CLIENT] Skipping duplicate analysis for block ${newId}`);
                   }
@@ -569,6 +635,48 @@ const TranscriptionRoom = ({ initialService }) => {
 
     socketRef.current.on('agent_switched', ({ agentType }) => {
       console.log(`AI Agent switched to: ${agentType}`);
+    });
+
+    // ── Code Deep Dive response listener ──────────────────────────────────
+    socketRef.current.on('code_deep_dive_response', (response) => {
+      setCodeDeepDiveResponses(prev => {
+        const entry = {
+          text: response.text,
+          blockId: response.blockId,
+          timestamp: response.timestamp || new Date().toISOString(),
+          agent: response.agent,
+          isError: response.isError || false
+        };
+        // Replace if same blockId already exists, otherwise append
+        const idx = prev.findIndex(r => r.blockId === response.blockId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = entry;
+          return updated;
+        }
+        return [...prev, entry];
+      });
+    });
+
+    // ── System Design response listener ───────────────────────────────────
+    socketRef.current.on('system_design_response', (response) => {
+      setSystemDesignResponses(prev => {
+        const entry = {
+          text: response.text,
+          blockId: response.blockId,
+          timestamp: response.timestamp || new Date().toISOString(),
+          agent: response.agent,
+          counter: response.counter,
+          isError: response.isError || false
+        };
+        const idx = prev.findIndex(r => r.blockId === response.blockId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = entry;
+          return updated;
+        }
+        return [...prev, entry];
+      });
     });
 
     return () => {
@@ -1138,71 +1246,117 @@ const TranscriptionRoom = ({ initialService }) => {
             </Button>
           </div>
         )}
-        {/* Header: Enterprise quick polish */}
-        <div className="flex items-center justify-between mb-6 py-2">
-          <div className="flex items-center gap-4">
-            <div>
-              <div className="text-lg font-semibold tracking-tight">ASR SyncScribe</div>
-              <div className="text-xs text-muted-foreground">
-                Room • {(() => {
-                  const displayId = roomId || socketRef.current?.id || 'Connecting...';
-                  // Truncate long IDs for display
-                  const truncated = displayId.length > 20 ? displayId.substring(0, 20) + '...' : displayId;
-                  return truncated;
-                })()}
-                {!socketConnected && (
-                  <span className="ml-2 text-orange-500">⚠️</span>
-                )}
-                {socketConnected && (
-                  <span className="ml-2 text-green-500">●</span>
-                )}
+        {/* ── App Header ─────────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between mb-5 gap-3 flex-wrap">
+
+          {/* LEFT — brand + status strip */}
+          <div className="flex items-center gap-3 min-w-0">
+            {/* Wordmark */}
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="h-7 w-7 rounded-lg bg-primary/90 flex items-center justify-center">
+                <Mic className="h-3.5 w-3.5 text-primary-foreground" />
               </div>
+              <span className="text-base font-bold tracking-tight">SyncScribe</span>
             </div>
-            <div className="hidden md:flex items-center gap-2 pl-4 border-l border-border/60">
-              <Badge variant="secondary">
-                {selectedService === 'deepgram' ? 'Deepgram' : selectedService === 'openai' ? 'OpenAI' : selectedService === 'google' ? 'Google Cloud' : 'Provider'}
-              </Badge>
-              <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                <span className={`h-2 w-2 rounded-full ${isRecording || isScreenSharing ? 'bg-green-500 animate-pulse' : 'bg-orange-500'}`} />
-                {isRecording || isScreenSharing ? 'Live' : 'Idle'}
+
+            {/* Divider */}
+            <span className="text-border select-none hidden sm:block">|</span>
+
+            {/* Provider pill */}
+            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.06] border border-white/15 text-[11px]">
+              {selectedService === 'deepgram' && <span className="h-1.5 w-1.5 rounded-full bg-sky-400 shrink-0" />}
+              {selectedService === 'openai'   && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />}
+              {selectedService === 'google'   && <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 shrink-0" />}
+              {!selectedService               && <span className="h-1.5 w-1.5 rounded-full bg-white/30 shrink-0" />}
+              <span className="font-bold text-[#f5f0e8]">
+                {selectedService === 'deepgram' ? 'Deepgram' : selectedService === 'openai' ? 'OpenAI' : selectedService === 'google' ? 'Google Cloud' : 'No provider'}
               </span>
-              <span className="text-xs text-muted-foreground">{formatDuration(sessionElapsedMs)}</span>
+            </div>
+
+            {/* Live / Idle + timer */}
+            <div className={cn(
+              'hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold border',
+              isRecording || isScreenSharing
+                ? 'bg-red-950/50 border-red-500/50 text-red-200'
+                : 'bg-white/[0.06] border-white/15 text-[#f5f0e8]'
+            )}>
+              <span className={cn(
+                'h-1.5 w-1.5 rounded-full shrink-0',
+                isRecording || isScreenSharing ? 'bg-red-400 animate-pulse' : 'bg-[#f5f0e8]/50'
+              )} />
+              {isRecording || isScreenSharing ? 'Live' : 'Idle'}
+              {sessionElapsedMs > 0 && (
+                <span className="tabular-nums ml-0.5 font-mono text-[#f5f0e8]/70">{formatDuration(sessionElapsedMs)}</span>
+              )}
+            </div>
+
+            {/* Room ID chip */}
+            <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.06] border border-white/15 text-[10px] font-mono max-w-[210px]">
+              <span className="text-[#f5f0e8]/40 shrink-0 font-bold not-italic">Room</span>
+              <span className="text-[#f5f0e8] font-bold tracking-wide truncate">
+                {(roomId || socketRef.current?.id || '—').substring(0, 20)}
+              </span>
+              {socketConnected
+                ? <span className="h-1.5 w-1.5 rounded-full bg-green-400 shrink-0" />
+                : <span className="h-1.5 w-1.5 rounded-full bg-orange-400 animate-pulse shrink-0" />}
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
+
+          {/* RIGHT — action buttons */}
+          <div className="flex items-center gap-2 flex-wrap">
+
+            {/* Copy Link */}
+            <button
               onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(window.location.href);
                   setLinkCopied(true);
                   setTimeout(() => setLinkCopied(false), 1500);
-                } catch (e) {}
+                } catch (_) {}
               }}
               title="Copy room link"
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
+                linkCopied
+                  ? 'bg-green-950/40 border-green-500/40 text-green-300'
+                  : 'border-white/15 text-white/50 hover:text-white hover:border-white/35 bg-white/[0.03]'
+              )}
             >
-              {linkCopied ? <Check className="h-4 w-4 mr-2" /> : <Copy className="h-4 w-4 mr-2" />}Copy Link
-            </Button>
+              {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              {linkCopied ? 'Copied!' : 'Copy Link'}
+            </button>
+
+            {/* Copy Transcript — only when there's content */}
             {(transcriptBlocks.length > 0 || currentBlock.text) && (
-              <>
-                <Button variant="outline" size="sm" onClick={copyTranscript}>
-                  {transcriptCopied ? (
-                    <>
-                      <Check className="h-4 w-4 mr-2" />Copied
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-4 w-4 mr-2" />Copy
-                    </>
-                  )}
-                </Button>
-                <Button variant="outline" size="sm" onClick={exportTranscript}>
-                  <Download className="h-4 w-4 mr-2" />Export
-                </Button>
-              </>
+              <button
+                onClick={copyTranscript}
+                title="Copy transcript to clipboard"
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all',
+                  transcriptCopied
+                    ? 'bg-green-950/40 border-green-500/40 text-green-300'
+                    : 'border-white/15 text-white/50 hover:text-white hover:border-white/35 bg-white/[0.03]'
+                )}
+              >
+                {transcriptCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                {transcriptCopied ? 'Copied!' : 'Copy Transcript'}
+              </button>
             )}
-            <Settings 
+
+            {/* Export Transcript — only when there's content */}
+            {(transcriptBlocks.length > 0 || currentBlock.text) && (
+              <button
+                onClick={exportTranscript}
+                title="Export transcript as text file"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-white/15 text-white/50 hover:text-white hover:border-white/35 bg-white/[0.03] transition-all"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Export Transcript
+              </button>
+            )}
+
+            {/* Settings */}
+            <Settings
               selectedService={selectedService}
               setSelectedService={setSelectedService}
               currentStep={currentStep}
@@ -1437,73 +1591,122 @@ const TranscriptionRoom = ({ initialService }) => {
           </div>
 
           {/* Right Panel - AI Analysis */}
-          <div className="lg:col-span-8">
-            <Card className="h-[calc(100vh-8rem)]">
-              <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-xl">AI Analysis</CardTitle>
-                  <div className="flex items-center gap-4">
-                    {currentSegment.startTime && (
-                      <div className="flex items-center gap-2">
-                        <Clock className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-sm text-muted-foreground">
-                          {currentSegment.timeLeft}s until analysis
-                        </span>
-                        <div className="w-24 h-2 bg-secondary rounded-full overflow-hidden">
-                          <div 
-                            className="h-full bg-primary transition-all duration-1000 ease-linear"
-                            style={{ width: `${(currentSegment.timeLeft / 20) * 100}%` }}
-                          />
-                        </div>
+          <div className="lg:col-span-8 min-w-0 overflow-hidden">
+            <Card className="h-[calc(100vh-8rem)] overflow-hidden">
+              <CardHeader className="pb-2 border-b border-border/50">
+                {/* ── Top row: title + all controls ── */}
+                <div className="flex items-center gap-3 flex-wrap">
+                  <CardTitle className="text-base font-semibold shrink-0">AI Analysis</CardTitle>
+
+                  {/* countdown pill */}
+                  {currentSegment.startTime && (
+                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/5 border border-white/10">
+                      <Clock className="h-3 w-3 text-muted-foreground" />
+                      <span className="text-[11px] text-muted-foreground tabular-nums">{currentSegment.timeLeft}s</span>
+                      <div className="w-14 h-1 bg-secondary rounded-full overflow-hidden">
+                        <div className="h-full bg-primary transition-all duration-1000 ease-linear" style={{ width: `${(currentSegment.timeLeft / 20) * 100}%` }} />
                       </div>
-                    )}
-                    <div className="flex items-center gap-4">
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={isAutoScrollEnabled}
-                          onChange={(e) => setIsAutoScrollEnabled(e.target.checked)}
-                          className="rounded border-gray-300"
-                        />
-                        <span className="text-sm text-muted-foreground">Auto Scroll</span>
-                      </label>
-                      <label className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={isAiAnalysisEnabled}
-                          onChange={(e) => setIsAiAnalysisEnabled(e.target.checked)}
-                          className="rounded border-gray-300"
-                        />
-                        <span className="text-sm text-muted-foreground">AI Analysis</span>
-                      </label>
-                      {isAiAnalysisEnabled && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm text-muted-foreground">Type:</span>
-                          <select
-                            value={useRAG ? 'rag' : 'original'}
-                            onChange={(e) => {
-                              const newValue = e.target.value === 'rag';
-                              console.log(`[CLIENT] Changing analysis type: ${newValue ? 'Document-Enhanced' : 'Original'}`);
-                              setUseRAG(newValue);
-                            }}
-                            className="text-sm bg-background border border-border rounded px-2 py-1 cursor-pointer"
-                          >
-                            <option value="original">Original</option>
-                            <option value="rag">Document-Enhanced</option>
-                          </select>
-                        </div>
-                      )}
                     </div>
-                  </div>
+                  )}
+
+                  {/* divider */}
+                  <span className="text-white/10 select-none hidden sm:block">|</span>
+
+                  {/* Auto Scroll toggle pill */}
+                  <button
+                    onClick={() => setIsAutoScrollEnabled(v => !v)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all',
+                      isAutoScrollEnabled
+                        ? 'bg-primary/15 border-primary/40 text-primary'
+                        : 'border-white/10 text-white/30 hover:text-white/60 hover:border-white/25'
+                    )}
+                  >
+                    <Maximize2 className="h-3 w-3" />
+                    Auto Scroll
+                  </button>
+
+                  {/* AI Analysis toggle pill */}
+                  <button
+                    onClick={() => setIsAiAnalysisEnabled(v => !v)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all',
+                      isAiAnalysisEnabled
+                        ? 'bg-blue-950/60 border-blue-500/50 text-blue-300'
+                        : 'border-white/10 text-white/30 hover:text-white/60 hover:border-white/25'
+                    )}
+                  >
+                    <Activity className="h-3 w-3" />
+                    AI Analysis
+                  </button>
+
+                  {/* Type select — only when AI enabled */}
+                  {isAiAnalysisEnabled && (
+                    <select
+                      value={useRAG ? 'rag' : 'original'}
+                      onChange={(e) => setUseRAG(e.target.value === 'rag')}
+                      className={cn(
+                        'text-[11px] rounded-full px-2.5 py-1 border cursor-pointer transition-all outline-none',
+                        useRAG
+                          ? 'bg-purple-950/50 border-purple-500/40 text-purple-300'
+                          : 'bg-white/5 border-white/15 text-white/50 hover:border-white/30'
+                      )}
+                    >
+                      <option value="original">Original</option>
+                      <option value="rag">Doc-Enhanced</option>
+                    </select>
+                  )}
+
+                  {/* divider */}
+                  <span className="text-white/10 select-none hidden sm:block">|</span>
+
+                  {/* Code Deep Dive pill */}
+                  <button
+                    onClick={() => setIsCodeDeepDiveEnabled(v => !v)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all',
+                      isCodeDeepDiveEnabled
+                        ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-300'
+                        : 'border-white/10 text-white/30 hover:text-emerald-400 hover:border-emerald-500/40'
+                    )}
+                  >
+                    <Terminal className="h-3 w-3" />
+                    Code Dive
+                  </button>
+
+                  {/* System Design pill */}
+                  <button
+                    onClick={() => setIsSystemDesignEnabled(v => !v)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all',
+                      isSystemDesignEnabled
+                        ? 'bg-violet-950/60 border-violet-500/50 text-violet-300'
+                        : 'border-white/10 text-white/30 hover:text-violet-400 hover:border-violet-500/40'
+                    )}
+                  >
+                    <Network className="h-3 w-3" />
+                    Sys Design
+                  </button>
+
+                  {/* Full View button */}
+                  <button
+                    onClick={openFullView}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border border-white/20 text-white/50 hover:text-white hover:border-white/50 transition-all ml-auto"
+                  >
+                    <Columns3 className="h-3 w-3" />
+                    Full View
+                  </button>
                 </div>
-                <CardDescription>
-                  {currentSegment.startTime 
-                    ? "Collecting conversation context..."
-                    : "Waiting for conversation to begin..."}
+
+                <CardDescription className="mt-1.5 text-xs">
+                  {currentSegment.startTime
+                    ? 'Collecting conversation context…'
+                    : 'Waiting for conversation to begin…'}
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <ScrollArea className="h-[calc(100vh-16rem)]" ref={aiResponsesRef}>
+                <div className="pr-4 min-w-0">
                   {!isAiAnalysisEnabled ? (
                     <div className="text-center text-muted-foreground py-12">
                       <p className="mb-2">AI Analysis is currently disabled.</p>
@@ -1518,21 +1721,9 @@ const TranscriptionRoom = ({ initialService }) => {
                       
                       if (ai || aiRag) {
                         return (
-                          <div className="space-y-4">
-                            {ai && (
-                            <Card>
-                              <CardContent className="pt-6">
-                                <AIResponse response={ai} />
-                              </CardContent>
-                            </Card>
-                            )}
-                            {aiRag && ragAuthenticated && (
-                              <Card>
-                                <CardContent className="pt-6">
-                                  <AIResponse response={aiRag} />
-                                </CardContent>
-                              </Card>
-                            )}
+                          <div className="space-y-4 min-w-0">
+                            {ai && <AIResponse response={ai} />}
+                            {aiRag && ragAuthenticated && <AIResponse response={aiRag} />}
                           </div>
                         );
                       }
@@ -1542,57 +1733,331 @@ const TranscriptionRoom = ({ initialService }) => {
                             <p>Analysis will appear every 20 seconds.</p>
                           </div>
                         ) : (
-                          <div className="space-y-4">
-                            {(() => {
-                              const filtered = aiResponses.filter(response => {
-                                // Hide Document-Enhanced responses if not authenticated
-                                if (response.analysisType === 'document-enhanced' && !ragAuthenticated) {
-                                  return false;
-                                }
-                                // Filter by selected analysis type
-                                if (useRAG && response.analysisType !== 'document-enhanced') {
-                                  console.log(`[CLIENT] Filtering out ${response.analysisType} response (user wants Document-Enhanced)`);
-                                  return false; // User wants Document-Enhanced, hide Original
-                                }
-                                if (!useRAG && response.analysisType !== 'original') {
-                                  console.log(`[CLIENT] Filtering out ${response.analysisType} response (user wants Original)`);
-                                  return false; // User wants Original, hide Document-Enhanced
-                                }
+                          <div className="space-y-4 min-w-0">
+                            {aiResponses
+                              .filter(response => {
+                                if (response.analysisType === 'document-enhanced' && !ragAuthenticated) return false;
+                                if (useRAG && response.analysisType !== 'document-enhanced') return false;
+                                if (!useRAG && response.analysisType !== 'original') return false;
                                 return true;
-                              });
-                              console.log(`[CLIENT] Filtered responses: ${filtered.length} of ${aiResponses.length} (useRAG=${useRAG})`);
-                              return filtered;
-                            })()
-                              .map((response, index) => {
-                              return (
-                              <Card key={index}>
-                                <CardContent className="pt-6">
-                                  <AIResponse response={response} />
-                                </CardContent>
-                              </Card>
-                              );
-                            })}
+                              })
+                              .map((response, index) => (
+                                <AIResponse key={index} response={response} />
+                              ))}
                           </div>
                         )
                       );
                     })()
                   )}
                   {isAiThinking && isAiAnalysisEnabled && (
-                    <Card className="mt-4">
-                      <CardContent className="pt-6">
-                        <div className="flex items-center gap-2 text-muted-foreground">
-                          <div className="h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-                          Analyzing recent conversation...
-                        </div>
-                      </CardContent>
-                    </Card>
+                    <div className="mt-4 flex items-center gap-2 text-muted-foreground px-1">
+                      <div className="h-4 w-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                      <span className="text-sm">Analyzing recent conversation...</span>
+                    </div>
                   )}
+                </div>
                 </ScrollArea>
               </CardContent>
             </Card>
           </div>
         </div>
+
+        {/* ── Bottom row: Code Deep Dive + System Design Viewer ───────── */}
+        {(isCodeDeepDiveEnabled || isSystemDesignEnabled) && (
+          <div className={cn(
+            'grid gap-6 mt-4',
+            isCodeDeepDiveEnabled && isSystemDesignEnabled
+              ? 'grid-cols-1 lg:grid-cols-2'
+              : 'grid-cols-1'
+          )}>
+
+            {/* Code Deep Dive Panel */}
+            {isCodeDeepDiveEnabled && (
+              <div className="min-w-0 overflow-hidden">
+                <Card className="overflow-hidden border-emerald-500/30" style={{ height: '75vh' }}>
+                  <CardHeader className="py-3 px-4 border-b border-emerald-500/20 shrink-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Terminal className="h-4 w-4 text-emerald-400" />
+                        <CardTitle className="text-sm font-semibold text-emerald-300">Code Deep Dive</CardTitle>
+                      </div>
+                      <button
+                        onClick={() => setIsCodeDeepDiveEnabled(false)}
+                        className="text-[11px] text-white/25 hover:text-white/60 transition-colors px-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="p-0" style={{ height: 'calc(75vh - 3.5rem)', overflowY: 'auto', overflowX: 'hidden' }}>
+                    <div className="p-4 space-y-3" style={{ minWidth: 0 }}>
+                      {codeDeepDiveResponses.length === 0 ? (
+                        <div className="text-center text-muted-foreground py-16">
+                          <Terminal className="h-8 w-8 mx-auto mb-3 text-emerald-800" />
+                          <p className="text-sm">Code Deep Dive responses appear here</p>
+                        </div>
+                      ) : (
+                        [...codeDeepDiveResponses].reverse().map((r, i) => (
+                          <CodeDeepDive key={r.blockId || i} response={r} />
+                        ))
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+            {/* System Design Viewer Panel */}
+            {isSystemDesignEnabled && (
+              <div className="min-w-0 overflow-hidden">
+                <Card className="overflow-hidden border-violet-500/30" style={{ height: '75vh' }}>
+                  <CardHeader className="py-3 px-4 border-b border-violet-500/20 shrink-0">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Network className="h-4 w-4 text-violet-400" />
+                        <CardTitle className="text-sm font-semibold text-violet-300">System Design Viewer</CardTitle>
+                      </div>
+                      <button
+                        onClick={() => setIsSystemDesignEnabled(false)}
+                        className="text-[11px] text-white/25 hover:text-white/60 transition-colors px-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="p-0" style={{ height: 'calc(75vh - 3.5rem)', overflow: 'hidden' }}>
+                    <ScrollArea className="h-full">
+                      <div className="p-4 min-w-0 space-y-3">
+                        {systemDesignResponses.length === 0 ? (
+                          <div className="text-center text-muted-foreground py-16">
+                            <Network className="h-8 w-8 mx-auto mb-3 text-violet-800" />
+                            <p className="text-sm">System Design diagrams appear here</p>
+                          </div>
+                        ) : (
+                          [...systemDesignResponses].reverse().map((r, i) => (
+                            <SystemDesignViewer key={r.blockId || i} response={r} counter={r.counter} />
+                          ))
+                        )}
+                      </div>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </div>
+            )}
+
+          </div>
+        )}
+
       </div>
+
+      {/* ── Full-View Triple Panel Overlay ────────────────────────────────── */}
+      {isFullView && (() => {
+        // Resolve the block to display
+        const fvIdx = fullViewBlockIdx !== null
+          ? Math.max(0, Math.min(fullViewBlockIdx, transcriptBlocks.length - 1))
+          : transcriptBlocks.length - 1;
+        const fvBlock = transcriptBlocks[fvIdx];
+        const canPrev = fvIdx > 0;
+        const canNext = fvIdx < transcriptBlocks.length - 1;
+
+        // Per-block code deep dive and system design (matched by blockId)
+        const fvBlockId = fvBlock?.id;
+        const fvCode = codeDeepDiveResponses.find(r => r.blockId === fvBlockId);
+        const fvDesign = systemDesignResponses.find(r => r.blockId === fvBlockId);
+
+        // Fallback: show most recent responses if no block match
+        const displayCode = fvCode || codeDeepDiveResponses[codeDeepDiveResponses.length - 1];
+        const displayDesign = fvDesign || systemDesignResponses[systemDesignResponses.length - 1];
+
+        // AI responses filtered for this block
+        const fvAi = fvBlock?.ai;
+        const fvAiRag = fvBlock?.aiRag;
+
+        return (
+          <div className="fixed inset-0 z-[60] bg-background flex flex-col" style={{ minWidth: 0 }}>
+
+            {/* ── Header: single compact row, never wraps ─────────────── */}
+            <div
+              className="shrink-0 border-b border-border bg-background"
+              style={{ display: 'grid', gridTemplateColumns: 'auto 1fr auto', alignItems: 'center', gap: '0', minHeight: '2.75rem' }}
+            >
+              {/* LEFT — Back + title */}
+              <div className="flex items-center gap-2 pl-4 pr-3 border-r border-border/50 h-full">
+                <button
+                  onClick={() => setIsFullView(false)}
+                  className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  Back
+                </button>
+                <span className="text-white/15 select-none">|</span>
+                <span className="text-xs font-medium text-white/50 whitespace-nowrap hidden sm:block">Full Analysis View</span>
+              </div>
+
+              {/* CENTER — Block navigation (takes all available space, centres itself) */}
+              <div className="flex items-center justify-center gap-1.5 px-3">
+                <button
+                  onClick={() => setFullViewBlockIdx(Math.max(0, fvIdx - 1))}
+                  disabled={!canPrev}
+                  className={cn(
+                    'flex items-center gap-0.5 px-2 py-0.5 rounded text-[11px] border transition-all whitespace-nowrap',
+                    canPrev ? 'border-white/20 text-white/60 hover:text-white hover:border-white/50' : 'border-white/5 text-white/20 cursor-not-allowed'
+                  )}
+                >
+                  <ArrowLeft className="h-2.5 w-2.5" />
+                  Prev
+                </button>
+
+                <div className="flex items-center gap-1 px-2.5 py-0.5 bg-white/5 rounded border border-white/10 text-[11px] tabular-nums whitespace-nowrap">
+                  <span className="text-white/30">Block</span>
+                  <span className="font-mono font-semibold text-white/80">{transcriptBlocks.length > 0 ? fvIdx + 1 : '—'}</span>
+                  <span className="text-white/20">/ {transcriptBlocks.length}</span>
+                </div>
+
+                <button
+                  onClick={() => setFullViewBlockIdx(Math.min(transcriptBlocks.length - 1, fvIdx + 1))}
+                  disabled={!canNext}
+                  className={cn(
+                    'flex items-center gap-0.5 px-2 py-0.5 rounded text-[11px] border transition-all whitespace-nowrap',
+                    canNext ? 'border-white/20 text-white/60 hover:text-white hover:border-white/50' : 'border-white/5 text-white/20 cursor-not-allowed'
+                  )}
+                >
+                  Next
+                  <ArrowLeft className="h-2.5 w-2.5 rotate-180" />
+                </button>
+
+                <button
+                  onClick={() => setFullViewBlockIdx(transcriptBlocks.length - 1)}
+                  disabled={!canNext}
+                  className={cn(
+                    'px-2 py-0.5 rounded text-[11px] border transition-all whitespace-nowrap',
+                    canNext ? 'border-white/20 text-white/35 hover:text-white hover:border-white/40' : 'border-white/5 text-white/15 cursor-not-allowed'
+                  )}
+                >
+                  Latest
+                </button>
+              </div>
+
+              {/* RIGHT — legend dots (shrinks gracefully, hides labels at small widths) */}
+              <div className="flex items-center gap-2 pr-4 pl-3 border-l border-border/50 h-full">
+                <span className="flex items-center gap-1 text-[10px] text-white/30 whitespace-nowrap">
+                  <span className="h-1.5 w-1.5 rounded-full bg-blue-500 shrink-0" />
+                  <span className="hidden md:inline">AI Analysis</span>
+                </span>
+                <span className="flex items-center gap-1 text-[10px] text-white/30 whitespace-nowrap">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 shrink-0" />
+                  <span className="hidden md:inline">Code Deep Dive</span>
+                </span>
+                <span className="flex items-center gap-1 text-[10px] text-white/30 whitespace-nowrap">
+                  <span className="h-1.5 w-1.5 rounded-full bg-violet-500 shrink-0" />
+                  <span className="hidden md:inline">System Design</span>
+                </span>
+              </div>
+            </div>
+
+            {/* ── Transcript ticker — marquee / news-banner ──────────────── */}
+            {fvBlock?.text && (
+              <div className="shrink-0 border-b border-border bg-white/[0.015]" style={{ height: '2rem', display: 'flex', alignItems: 'center' }}>
+                <span className="shrink-0 px-3 text-[10px] text-white/20 font-mono border-r border-white/10 h-full flex items-center select-none">
+                  TRANSCRIPT
+                </span>
+                <div className="marquee-outer flex-1 h-full flex items-center">
+                  {/* Duplicate text so the loop is seamless */}
+                  <div className="marquee-track">
+                    <span className="text-[11px] text-white/40 px-6">
+                      {fvBlock.text}&nbsp;&nbsp;&nbsp;·&nbsp;&nbsp;&nbsp;{fvBlock.text}
+                    </span>
+                    <span className="text-[11px] text-white/40 px-6" aria-hidden>
+                      {fvBlock.text}&nbsp;&nbsp;&nbsp;·&nbsp;&nbsp;&nbsp;{fvBlock.text}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Three equal columns ────────────────────────────────────── */}
+            {/*
+              Each column: flex-col, exact 1/3 width via CSS grid to guarantee equal sizing.
+              overflow:hidden on the col prevents content escaping.
+              ScrollArea inside each col takes the remaining height.
+            */}
+            <div
+              className="flex-1 overflow-hidden"
+              style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', minHeight: 0 }}
+            >
+
+              {/* Column 1 — AI Analysis */}
+              <div className="flex flex-col border-r border-border overflow-hidden" style={{ minWidth: 0 }}>
+                <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-blue-950/10 shrink-0">
+                  <span className="h-2 w-2 rounded-full bg-blue-500 shrink-0" />
+                  <span className="text-xs font-semibold text-blue-300 truncate">AI Analysis</span>
+                </div>
+                <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ minHeight: 0 }}>
+                  <div className="p-4 space-y-3" style={{ minWidth: 0 }}>
+                    {fvAi || fvAiRag ? (
+                      <>
+                        {fvAi && <AIResponse response={fvAi} />}
+                        {fvAiRag && ragAuthenticated && <AIResponse response={fvAiRag} />}
+                      </>
+                    ) : (
+                      <div className="text-center text-muted-foreground py-16 text-sm">
+                        No analysis for this block yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Column 2 — Code Deep Dive */}
+              <div className="flex flex-col border-r border-border overflow-hidden" style={{ minWidth: 0 }}>
+                <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-emerald-950/10 shrink-0">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500 shrink-0" />
+                  <span className="text-xs font-semibold text-emerald-300 truncate">Code Deep Dive</span>
+                  {!fvCode && displayCode && (
+                    <span className="text-[10px] text-white/20 ml-auto shrink-0">latest</span>
+                  )}
+                </div>
+                <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ minHeight: 0 }}>
+                  <div className="p-4 space-y-3" style={{ minWidth: 0 }}>
+                    {displayCode ? (
+                      <CodeDeepDive response={displayCode} />
+                    ) : (
+                      <div className="text-center text-muted-foreground py-16">
+                        <Terminal className="h-8 w-8 mx-auto mb-3 text-emerald-800" />
+                        <p className="text-sm">No Code Deep Dive yet</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Column 3 — System Design Viewer */}
+              <div className="flex flex-col overflow-hidden" style={{ minWidth: 0 }}>
+                <div className="flex items-center gap-2 px-4 py-2 border-b border-border bg-violet-950/10 shrink-0">
+                  <span className="h-2 w-2 rounded-full bg-violet-500 shrink-0" />
+                  <span className="text-xs font-semibold text-violet-300 truncate">System Design Viewer</span>
+                  {!fvDesign && displayDesign && (
+                    <span className="text-[10px] text-white/20 ml-auto shrink-0">latest</span>
+                  )}
+                </div>
+                <div className="flex-1 overflow-y-auto overflow-x-hidden" style={{ minHeight: 0 }}>
+                  <div className="p-4 space-y-3" style={{ minWidth: 0 }}>
+                    {displayDesign ? (
+                      <SystemDesignViewer response={displayDesign} counter={displayDesign.counter} />
+                    ) : (
+                      <div className="text-center text-muted-foreground py-16">
+                        <Network className="h-8 w-8 mx-auto mb-3 text-violet-800" />
+                        <p className="text-sm">No System Design yet</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Footer debug floating button */}
       <div className="fixed bottom-4 right-4 flex items-center gap-2 z-50">
