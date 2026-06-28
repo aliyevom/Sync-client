@@ -14,8 +14,25 @@ import {
   RefreshCw,
   CheckCircle,
   XCircle,
-  AlertCircle
+  AlertCircle,
+  Mic,
+  Monitor
 } from 'lucide-react';
+
+const MEETING_MODES = [
+  {
+    id: 'one-on-one',
+    label: '1:1 Meeting',
+    description: 'Use your laptop microphone. No screen or tab selection required.',
+    icon: Mic
+  },
+  {
+    id: 'group',
+    label: 'Group / Tab Meeting',
+    description: 'Share a browser tab or screen to capture meeting audio.',
+    icon: Monitor
+  }
+];
 
 const AI_AGENTS = [
   {
@@ -38,6 +55,8 @@ function Settings({
   isProviderLocked,
   selectedAgent = 'MEETING_ANALYST',
   onAgentChange,
+  meetingMode = 'one-on-one',
+  setMeetingMode,
   roomContext,
   socket,
   roomId,
@@ -48,13 +67,67 @@ function Settings({
   const [teamContext, setTeamContext] = useState(null);
   const [documentHealth, setDocumentHealth] = useState(null);
   const [isProcessingDocs, setIsProcessingDocs] = useState(false);
-  const [selectedBucket, setSelectedBucket] = useState(null); // 'n1', 'u1', or null for both
+  const [selectedBucket, setSelectedBucket] = useState(null); // 'n1', 'u1', 'u2', or null for all
   const [ragPassword, setRagPassword] = useState('');
   const [ragAuthenticated, setRagAuthenticated] = useState(() => {
     // Check if already authenticated in this session
     return localStorage.getItem('rag_authenticated') === 'true';
   });
   const [showPasswordPrompt, setShowPasswordPrompt] = useState(false);
+
+  // Dynamic prompt profiles loaded from Google Cloud
+  const [promptProfiles, setPromptProfiles] = useState([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
+  const [activeProfileId, setActiveProfileId] = useState(() => {
+    try { return localStorage.getItem('prompt_profile_id') || ''; } catch { return ''; }
+  });
+
+  const serverBaseUrl = () => process.env.REACT_APP_SERVER_URL || 'http://localhost:5002';
+
+  const fetchPromptProfiles = async (force = false) => {
+    setLoadingProfiles(true);
+    try {
+      if (force) {
+        await fetch(`${serverBaseUrl()}/api/prompt-profiles/refresh`, { method: 'POST' }).catch(() => {});
+      }
+      const res = await fetch(`${serverBaseUrl()}/api/prompt-profiles`);
+      const data = await res.json();
+      setPromptProfiles(Array.isArray(data.profiles) ? data.profiles : []);
+    } catch (err) {
+      console.error('Error fetching prompt profiles:', err);
+      setPromptProfiles([]);
+    } finally {
+      setLoadingProfiles(false);
+    }
+  };
+
+  const handleProfileSelect = (profileId) => {
+    setActiveProfileId(profileId);
+    try { localStorage.setItem('prompt_profile_id', profileId || ''); } catch (_) {}
+    const currentRoomId = roomId || socket?.id;
+    if (socket && currentRoomId) {
+      socket.emit('select_prompt_profile', { roomId: currentRoomId, profileId: profileId || null });
+    }
+  };
+
+  // Fetch profiles when the AI Agent tab opens; re-apply persisted selection
+  useEffect(() => {
+    if (activeTab === 'agent') {
+      fetchPromptProfiles(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Re-apply persisted profile to the room once socket is ready
+  useEffect(() => {
+    if (socket && activeProfileId) {
+      const currentRoomId = roomId || socket?.id;
+      if (currentRoomId) {
+        socket.emit('select_prompt_profile', { roomId: currentRoomId, profileId: activeProfileId });
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket]);
 
   useEffect(() => {
     if (socket && roomId && activeTab === 'context') {
@@ -261,6 +334,35 @@ function Settings({
               {/* Provider Tab */}
               {activeTab === 'provider' && (
                 <>
+                  <CardDescription className="mb-4">
+                    Choose how you want to capture audio for this session
+                  </CardDescription>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
+                    {MEETING_MODES.map((mode) => (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        className={`
+                          p-4 rounded-lg border-2 transition-all text-left
+                          ${meetingMode === mode.id
+                            ? 'border-primary bg-primary/10'
+                            : 'border-border hover:border-primary/50'}
+                          ${currentStep === 'transcribing' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                        `}
+                        onClick={() => setMeetingMode?.(mode.id)}
+                        disabled={currentStep === 'transcribing'}
+                      >
+                        <div className="flex items-start gap-3">
+                          <mode.icon className="h-5 w-5 mt-0.5 text-primary" />
+                          <div>
+                            <p className="font-medium">{mode.label}</p>
+                            <p className="text-xs text-muted-foreground mt-1">{mode.description}</p>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+
                   <CardDescription className="mb-6">
                     Choose your preferred speech-to-text service
                   </CardDescription>
@@ -379,6 +481,64 @@ function Settings({
                     ))}
                   </div>
                   
+                  {/* Conversation Style — dynamic prompt profiles from Google Cloud */}
+                  <div className="mt-6 p-4 bg-muted rounded-lg">
+                    <div className="flex items-center justify-between mb-2">
+                      <h4 className="font-medium flex items-center gap-2">
+                        <Database className="h-4 w-4" />
+                        Conversation Style
+                      </h4>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => fetchPromptProfiles(true)}
+                        disabled={loadingProfiles}
+                        className="h-7 text-xs"
+                      >
+                        <RefreshCw className={`h-3 w-3 mr-1 ${loadingProfiles ? 'animate-spin' : ''}`} />
+                        {loadingProfiles ? 'Loading…' : 'Refresh from Cloud'}
+                      </Button>
+                    </div>
+                    <p className="text-sm text-muted-foreground mb-3">
+                      Loaded from Google Cloud. The selected style dynamically re-shapes how
+                      AI Analysis, Code Deep Dive, and System Design respond — without changing app code.
+                    </p>
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleProfileSelect('')}
+                        className={`w-full p-3 rounded-lg border-2 text-left transition-all ${activeProfileId === '' ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50'}`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium text-sm">Default (built-in)</span>
+                          {activeProfileId === '' && <Badge variant="default" className="text-xs">Active</Badge>}
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">Use the app's built-in agent prompts.</p>
+                      </button>
+                      {promptProfiles.map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => handleProfileSelect(p.id)}
+                          className={`w-full p-3 rounded-lg border-2 text-left transition-all ${activeProfileId === p.id ? 'border-primary bg-primary/10' : 'border-border hover:border-primary/50'}`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-medium text-sm">{p.name || p.id}</span>
+                            {activeProfileId === p.id && <Badge variant="default" className="text-xs">Active</Badge>}
+                          </div>
+                          {p.description && (
+                            <p className="text-xs text-muted-foreground mt-1">{p.description}</p>
+                          )}
+                        </button>
+                      ))}
+                      {!loadingProfiles && promptProfiles.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No cloud styles found. Add a JSON profile to your prompts bucket, then Refresh.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
                   <div className="mt-6 p-4 bg-muted rounded-lg">
                     <div className="flex items-start gap-2">
                       <Info className="h-4 w-4 text-muted-foreground mt-0.5" />
@@ -493,6 +653,10 @@ function Settings({
                                 <span className="text-sm text-muted-foreground">Bucket U-1</span>
                                 <span className="text-sm font-mono">{documentHealth.gcs.buckets?.u1}</span>
                               </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm text-muted-foreground">Bucket U-2</span>
+                                <span className="text-sm font-mono">{documentHealth.gcs.buckets?.u2}</span>
+                              </div>
                             </>
                           )}
                         </div>
@@ -507,15 +671,15 @@ function Settings({
                         <p className="text-sm text-muted-foreground mb-3">
                           Choose which document bucket to use for AI analysis. The AI will search only the selected bucket(s) during meetings.
                         </p>
-                        <div className="grid grid-cols-3 gap-2">
+                        <div className="grid grid-cols-2 gap-2">
                           <Button
                             variant={selectedBucket === null ? "default" : "outline"}
                             size="sm"
                             onClick={() => handleBucketSelect(null)}
                             className="flex flex-col items-center gap-1 h-auto py-3"
                           >
-                            <span className="font-medium">Both</span>
-                            <span className="text-xs opacity-80">N-1 + U-1</span>
+                            <span className="font-medium">All</span>
+                            <span className="text-xs opacity-80">N-1 + U-1 + U-2</span>
                           </Button>
                           <Button
                             variant={selectedBucket === 'n1' ? "default" : "outline"}
@@ -535,10 +699,19 @@ function Settings({
                             <span className="font-medium">U-1 Only</span>
                             <span className="text-xs opacity-80">Bucket U-1</span>
                           </Button>
+                          <Button
+                            variant={selectedBucket === 'u2' ? "default" : "outline"}
+                            size="sm"
+                            onClick={() => handleBucketSelect('u2')}
+                            className="flex flex-col items-center gap-1 h-auto py-3"
+                          >
+                            <span className="font-medium">U-2 Only</span>
+                            <span className="text-xs opacity-80">Bucket U-2</span>
+                          </Button>
                         </div>
                         {selectedBucket !== null && (
                           <p className="text-xs text-muted-foreground mt-2">
-                            Currently searching: <strong>{selectedBucket === 'n1' ? 'Bucket N-1' : selectedBucket === 'u1' ? 'Bucket U-1' : 'Both Buckets'}</strong>
+                            Currently searching: <strong>{selectedBucket === 'n1' ? 'Bucket N-1' : selectedBucket === 'u1' ? 'Bucket U-1' : selectedBucket === 'u2' ? 'Bucket U-2' : 'All Buckets'}</strong>
                           </p>
                         )}
                       </div>

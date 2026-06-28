@@ -71,10 +71,8 @@ function CodeBlock({ code, language }) {
   );
 }
 
-// Parse a mixed text+code response into renderable segments
-function renderResponseText(text) {
-  if (!text) return null;
-
+// Split a mixed text+code response into code/prose segments
+function splitSegments(text) {
   // Split on fenced code blocks: ```lang\n...\n```
   const FENCE_RE = /```([^\n]*)\n([\s\S]*?)```/g;
   const segments = [];
@@ -82,7 +80,6 @@ function renderResponseText(text) {
   let match;
 
   while ((match = FENCE_RE.exec(text)) !== null) {
-    // Prose before this code block
     if (match.index > lastIndex) {
       segments.push({ type: 'prose', content: text.slice(lastIndex, match.index) });
     }
@@ -90,7 +87,6 @@ function renderResponseText(text) {
     lastIndex = match.index + match[0].length;
   }
 
-  // Remaining prose after last code block
   if (lastIndex < text.length) {
     segments.push({ type: 'prose', content: text.slice(lastIndex) });
   }
@@ -98,6 +94,28 @@ function renderResponseText(text) {
   if (segments.length === 0) {
     segments.push({ type: 'prose', content: text });
   }
+
+  return segments;
+}
+
+// Render a document-enhanced (RAG) response: code blocks get the syntax-
+// highlighted CodeBlock, prose keeps the [DOC] RAG highlighting.
+function renderDocEnhancedText(text, ragSources) {
+  if (!text) return null;
+  return splitSegments(text).map((seg, idx) => {
+    if (seg.type === 'code') {
+      return <CodeBlock key={idx} code={seg.content} language={seg.language} />;
+    }
+    if (!seg.content.trim()) return null;
+    return <RAGHighlightedText key={idx} text={seg.content} ragSources={ragSources || []} />;
+  });
+}
+
+// Parse a mixed text+code response into renderable segments
+function renderResponseText(text) {
+  if (!text) return null;
+
+  const segments = splitSegments(text);
 
   return segments.map((seg, idx) => {
     if (seg.type === 'code') {
@@ -220,11 +238,8 @@ function AIResponse({ response }) {
         ) : (
           <div className="space-y-3">
             {isDocumentEnhanced && response.ragUsed ? (
-              <div className="text-sm leading-relaxed">
-                <RAGHighlightedText 
-                  text={response.text} 
-                  ragSources={response.ragSources || []} 
-                />
+              <div className="space-y-2 text-sm leading-relaxed">
+                {renderDocEnhancedText(response.text, response.ragSources)}
               </div>
             ) : (
               <div className="space-y-2">
