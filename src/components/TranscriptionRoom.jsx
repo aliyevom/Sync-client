@@ -22,12 +22,50 @@ import {
   Columns3,
   ArrowLeft,
   Terminal,
-  Network
+  Network,
+  Users,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import AIResponse from './AIResponse';
 import Settings from './Settings/Settings.jsx';
 import CodeDeepDive from './CodeDeepDive';
 import SystemDesignViewer from './SystemDesignViewer';
+
+// ── Speaker roles + capture modes (Phase 3/4) ──────────────────────────────
+const SPEAKER_ROLES = ['unknown', 'me', 'interviewer', 'customer', 'instructor', 'student'];
+const CAPTURE_MODES = [
+  { id: 'everyone', label: 'Capture everyone' },
+  { id: 'ignore_self', label: 'Ignore myself' },
+  { id: 'only_interviewer', label: 'Only interviewer/customer' },
+  { id: 'coach', label: 'Private coach mode' },
+];
+
+// Cheap stable hash for duplicate-turn protection
+const hashText = (s) => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0; }
+  return String(h);
+};
+
+// Semantic Incremental Turn-Taking score (Phase 1).
+// pause only RAISES confidence; it never triggers an answer on its own.
+const calculateTurnAnswerScore = (text, { isFinal, speechFinal, utteranceEnd, confidence = 0.9, pauseMs = 0 }) => {
+  const t = (text || '').trim();
+  const words = t ? t.split(/\s+/) : [];
+  let sem;
+  if (/[.?!]$/.test(t)) sem = 1.0;
+  else if (/^(what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did|tell|explain|walk|describe)\b/i.test(t) && words.length >= 5) sem = 0.8;
+  else if (words.length >= 8) sem = 0.6;
+  else if (words.length >= 4) sem = 0.4;
+  else sem = 0.2;
+  const intent = Math.max(0, Math.min(1, confidence));
+  const stab = isFinal ? 1 : 0.5;
+  const pause = Math.max(0, Math.min(1, pauseMs / 1500));
+  const finished = (speechFinal || utteranceEnd) ? 1 : 0;
+  const score = 0.35 * sem + 0.25 * intent + 0.15 * stab + 0.15 * pause + 0.10 * finished;
+  return { score, semanticCompleteness: sem };
+};
 
 const TranscriptionRoom = ({ initialService }) => {
   const [isRecording, setIsRecording] = useState(false);
@@ -40,6 +78,7 @@ const TranscriptionRoom = ({ initialService }) => {
   const serverUrlRef = useRef('http://localhost:5002'); // Store server URL for error messages
   const audioContextRef = useRef(null);
   const screenStreamRef = useRef(null);
+  const micStreamRef = useRef(null);
   const lastAnalysisTimeRef = useRef(null);
   const ANALYSIS_INTERVAL = 20000; // 20 seconds
   const [currentSegment, setCurrentSegment] = useState({
@@ -50,6 +89,15 @@ const TranscriptionRoom = ({ initialService }) => {
   const [screenPreview, setScreenPreview] = useState(null);
   const [selectedService, setSelectedService] = useState(initialService || '');
   const [currentStep, setCurrentStep] = useState('provider'); // 'provider', 'recording', 'transcribing'
+  const [meetingMode, setMeetingMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('meeting_mode');
+      if (saved === 'one-on-one' || saved === 'group') return saved;
+      return 'group';
+    } catch {
+      return 'group';
+    }
+  });
   const [isProviderLocked, setIsProviderLocked] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
   const [isAiAnalysisEnabled, setIsAiAnalysisEnabled] = useState(() => {
@@ -131,6 +179,14 @@ const TranscriptionRoom = ({ initialService }) => {
       console.warn('Failed to save AI Analysis enabled preference:', err);
     }
   }, [isAiAnalysisEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('meeting_mode', meetingMode);
+    } catch (err) {
+      console.warn('Failed to save meeting mode preference:', err);
+    }
+  }, [meetingMode]);
   const videoRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -167,9 +223,11 @@ const TranscriptionRoom = ({ initialService }) => {
     interim: '',
     startTime: null,
     isComplete: false,
-    id: null
+    id: null,
+    speakerId: null
   });
   const [selectedAgent, setSelectedAgent] = useState('MEETING_ANALYST');
+  useEffect(() => { selectedAgentRef.current = selectedAgent; }, [selectedAgent]);
   const [roomContext, setRoomContext] = useState(null);
   const [historyIdx, setHistoryIdx] = useState(null);
   const [historyStage, setHistoryStage] = useState('idle'); // 'new' | 'warn' | 'idle'
@@ -191,6 +249,37 @@ const TranscriptionRoom = ({ initialService }) => {
     return localStorage.getItem('rag_authenticated') === 'true';
   });
   const debugStatsRef = useRef({ bytesSent: 0, lastBytes: 0, chunksSent: 0, lastChunks: 0, interimCount: 0, finalCount: 0, lastTick: Date.now(), lastEmitTs: 0, latencies: [] });
+
+  // ── Phase 3/5: Speaker-aware model + session memory ──────────────────────
+  const [speakerProfiles, setSpeakerProfiles] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('speaker_profiles') || '{}'); } catch { return {}; }
+  });
+  const speakerProfilesRef = useRef(speakerProfiles);
+  const [captureMode, setCaptureMode] = useState(() => {
+    try { return localStorage.getItem('capture_mode') || 'everyone'; } catch { return 'everyone'; }
+  });
+  const captureModeRef = useRef(captureMode);
+  const selectedAgentRef = useRef('MEETING_ANALYST');
+
+  // ── Phase 1/2: Semantic Incremental Turn-Taking Controller ───────────────
+  const ANSWER_SCORE_THRESHOLD = 0.85;
+  const MAX_TURN_MS = 20000; // fallback max-turn cap
+  const currentBlockRef = useRef({ text: '', interim: '', startTime: null, isComplete: false, id: null, speakerId: null });
+  const activeTurnIdRef = useRef(null);
+  const pendingTurnsRef = useRef(new Set());      // turnIds awaiting an AI response
+  const supersededTurnsRef = useRef(new Set());   // turnIds whose answers must be dropped (revise/barge-in)
+  const lastFinalizeRef = useRef(null);           // { turnId, speakerId, at }
+  const lastFinalizedHashRef = useRef(null);      // duplicate protection
+
+  // Phase 5: persist speaker profiles + capture mode, keep refs in sync
+  useEffect(() => {
+    speakerProfilesRef.current = speakerProfiles;
+    try { localStorage.setItem('speaker_profiles', JSON.stringify(speakerProfiles)); } catch (_) {}
+  }, [speakerProfiles]);
+  useEffect(() => {
+    captureModeRef.current = captureMode;
+    try { localStorage.setItem('capture_mode', captureMode); } catch (_) {}
+  }, [captureMode]);
 
   const [debugSettings, setDebugSettings] = useState({
     // feature/context-encoder
@@ -414,15 +503,164 @@ const TranscriptionRoom = ({ initialService }) => {
       });
     }, 1000);
 
+    // ── Phase 3/5: speaker profile helpers ───────────────────────────────
+    const ensureSpeakerProfile = (speakerId) => {
+      const id = String(speakerId ?? 0);
+      if (speakerProfilesRef.current[id]) return;
+      const idx = Object.keys(speakerProfilesRef.current).length;
+      const def = {
+        speakerId: id,
+        displayName: `Speaker ${idx + 1}`,
+        role: 'unknown',
+        hidden: false,
+        confidence: 0,
+        lastSeenAt: Date.now(),
+        totalSpeechMs: 0,
+      };
+      // mutate ref immediately so same-tick lookups see it; state for UI
+      speakerProfilesRef.current = { ...speakerProfilesRef.current, [id]: def };
+      setSpeakerProfiles(p => (p[id] ? p : { ...p, [id]: def }));
+    };
+
+    // Resolve display + effective hidden flag (explicit flag + capture mode).
+    const resolveSpeaker = (speakerId) => {
+      const id = String(speakerId ?? 0);
+      const p = speakerProfilesRef.current[id] || { displayName: `Speaker ${(parseInt(id, 10) || 0) + 1}`, role: 'unknown', hidden: false };
+      const mode = captureModeRef.current;
+      let hidden = !!p.hidden;
+      if (mode === 'ignore_self' || mode === 'coach') {
+        if (p.role === 'me') hidden = true;
+      }
+      if (mode === 'only_interviewer') {
+        if (!['interviewer', 'customer', 'instructor'].includes(p.role)) hidden = true;
+      }
+      return { id, displayName: p.displayName || `Speaker ${(parseInt(id, 10) || 0) + 1}`, role: p.role || 'unknown', hidden };
+    };
+
+    const touchSpeaker = (id, block) => {
+      const ms = block.startTime ? (Date.now() - block.startTime) : 0;
+      setSpeakerProfiles(p => {
+        const cur = p[id];
+        if (!cur) return p;
+        return { ...p, [id]: { ...cur, lastSeenAt: Date.now(), totalSpeechMs: (cur.totalSpeechMs || 0) + ms } };
+      });
+    };
+
+    // ── Phase 1/2: finalize the current turn, gate + trigger AI ──────────
+    const finalizeAndAnalyze = (reason) => {
+      const prev = currentBlockRef.current;
+      if (!prev || (!prev.text && !prev.interim)) return;
+      const blockText = (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim();
+      if (!blockText) return;
+
+      const turnId = prev.id || `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const textHash = hashText(blockText);
+      if (lastFinalizedHashRef.current === textHash) {
+        // identical to last finalized turn — reset and bail (duplicate protection)
+        const empty = { text: '', interim: '', startTime: null, isComplete: false, id: null, speakerId: null };
+        currentBlockRef.current = empty; setCurrentBlock(empty);
+        return;
+      }
+      lastFinalizedHashRef.current = textHash;
+
+      const speaker = resolveSpeaker(prev.speakerId);
+
+      // Append finalized turn to the visible transcript (with speaker metadata)
+      setTranscriptBlocks(blocks => {
+        const next = [...blocks, {
+          ...prev,
+          text: blockText,
+          interim: '',
+          isComplete: true,
+          id: turnId,
+          turnId,
+          speakerId: speaker.id,
+          displayName: speaker.displayName,
+          role: speaker.role,
+          hidden: speaker.hidden,
+          aiTriggered: !speaker.hidden && isAiAnalysisEnabledRef.current,
+        }];
+        setHistoryIdx(next.length - 1);
+        setHistoryStage('new');
+        setTimeout(() => setHistoryStage('warn'), 1500);
+        return next;
+      });
+      touchSpeaker(speaker.id, prev);
+
+      // Reset current block for the next turn
+      const empty = { text: '', interim: '', startTime: null, isComplete: false, id: null, speakerId: null };
+      currentBlockRef.current = empty; setCurrentBlock(empty);
+
+      // Hidden speaker: show transcript only — never send to AI or rolling context
+      if (speaker.hidden) {
+        console.log(`[CLIENT] Hidden speaker (${speaker.displayName}) — turn ${turnId} not analyzed [${reason}]`);
+        return;
+      }
+      if (!isAiAnalysisEnabledRef.current) return;
+      if (processedBlocksRef.current.has(turnId)) return;
+      processedBlocksRef.current.add(turnId);
+
+      // Phase 2: barge-in / revise — if the same speaker continues within 2s and the
+      // previous turn's answer is still pending, supersede it so the stale answer is dropped.
+      const now = Date.now();
+      const last = lastFinalizeRef.current;
+      if (last && last.speakerId === speaker.id && (now - last.at) < 2000 && pendingTurnsRef.current.has(last.turnId)) {
+        supersededTurnsRef.current.add(last.turnId);
+        console.log(`[CLIENT] Superseding stale turn ${last.turnId} (revise by ${speaker.displayName})`);
+      }
+      lastFinalizeRef.current = { turnId, speakerId: speaker.id, at: now };
+      activeTurnIdRef.current = turnId;
+      pendingTurnsRef.current.add(turnId);
+
+      const currentRoomId = socketRef.current?.id || roomId;
+      const clientHistory = transcriptsByRoomClientRef.current;
+      clientHistory.push(blockText);
+      if (clientHistory.length > 20) clientHistory.splice(0, clientHistory.length - 20);
+
+      try {
+        setIsAiThinking(true);
+        socketRef.current.emit('process_with_ai', {
+          text: blockText,
+          roomId: currentRoomId,
+          agentType: selectedAgentRef.current,
+          blockId: turnId,
+          turnId,
+          speakerId: speaker.id,
+          displayName: speaker.displayName,
+          hidden: false,
+          useRAG: Boolean(useRAGRef.current),
+        });
+        if (isCodeDeepDiveEnabledRef.current) {
+          socketRef.current.emit('process_code_deep_dive', { text: blockText, roomId: currentRoomId, blockId: turnId });
+        }
+        if (isSystemDesignEnabledRef.current) {
+          socketRef.current.emit('process_system_design', { text: blockText, roomId: currentRoomId, blockId: turnId, recentBlocks: transcriptsByRoomClientRef.current || [] });
+        }
+      } catch (err) {
+        console.error('[X] [CLIENT] Error emitting process_with_ai:', err);
+      }
+    };
+
+    // ── Phase 1: end-of-turn signal from Deepgram (UtteranceEnd) ─────────
+    socketRef.current.on('utterance_end', () => {
+      const cur = currentBlockRef.current;
+      if (!cur || (!cur.text && !cur.interim)) return;
+      const turnText = (cur.text + (cur.interim ? ` ${cur.interim}` : '')).trim();
+      const { score } = calculateTurnAnswerScore(turnText, { isFinal: true, speechFinal: true, utteranceEnd: true, confidence: 0.9, pauseMs: 1000 });
+      if (score >= ANSWER_SCORE_THRESHOLD) {
+        finalizeAndAnalyze('utterance_end');
+      }
+    });
+
     socketRef.current.on('transcription', (transcription) => {
-      console.log('Received transcription:', transcription);
-      
       if (!transcription?.text) return;
 
       const isFinal = Boolean(transcription.isFinal);
-      const utteranceEnd = Boolean(transcription.speechFinal);
+      const speechFinal = Boolean(transcription.speechFinal);
       const txt = transcription.text.trim();
       if (!txt) return;
+      const speakerId = (typeof transcription.speakerTag === 'number') ? transcription.speakerTag : 0;
+      ensureSpeakerProfile(speakerId);
 
       // Debug stats & metadata
       try {
@@ -438,101 +676,52 @@ const TranscriptionRoom = ({ initialService }) => {
         }
       } catch (_) {}
 
-      setCurrentBlock(prev => {
-        // Start block if needed
-        const now = Date.now();
-        const shouldRotate = prev.startTime && now - prev.startTime > 20000;
-        if (!prev.startTime || prev.isComplete || shouldRotate) {
-          if (prev.text || prev.interim) {
-            setTranscriptBlocks(blocks => {
-              const newId = prev.id || `${Date.now()}_${blocks.length}`;
-              const next = [...blocks, { ...prev, isComplete: true, id: newId }];
-              setHistoryIdx(next.length - 1);
-              // Flash green, then hold yellow until the next finalized item arrives
-              setHistoryStage('new');
-              setTimeout(() => setHistoryStage('warn'), 1500);
-              // Trigger AI analysis for this finalized block (only if enabled)
-              if (isAiAnalysisEnabledRef.current) {
-                try {
-                  // Prevent duplicate AI analysis for the same block
-                  if (!processedBlocksRef.current.has(newId)) {
-                    processedBlocksRef.current.add(newId);
-                    const currentUseRAG = useRAGRef.current;
-                    const currentRoomId = socketRef.current?.id || roomId;
-                    const blockText = (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim();
+      const now = Date.now();
+      const prev = currentBlockRef.current;
+      const hasContent = prev.startTime && (prev.text || prev.interim);
+      const speakerChanged = hasContent && prev.speakerId !== null && prev.speakerId !== speakerId;
+      const tooOld = prev.startTime && (now - prev.startTime > MAX_TURN_MS);
 
-                    // Keep rolling client-side transcript for system design context
-                    const clientHistory = transcriptsByRoomClientRef.current;
-                    clientHistory.push(blockText);
-                    if (clientHistory.length > 20) clientHistory.splice(0, clientHistory.length - 20);
+      // Speaker boundary or max-turn cap → finalize the previous turn first
+      if (speakerChanged || tooOld) {
+        finalizeAndAnalyze(speakerChanged ? 'speaker_change' : 'max_turn');
+      }
 
-                    // ── Main AI analysis ──────────────────────────────────
-                    socketRef.current.emit('process_with_ai', { 
-                      text: blockText,
-                      roomId: currentRoomId,
-                      agentType: selectedAgent,
-                      blockId: newId,
-                      useRAG: Boolean(currentUseRAG)
-                    });
+      // Accumulate into the current turn
+      const cur = currentBlockRef.current;
+      let updated;
+      if (!cur.startTime || cur.id === null) {
+        updated = {
+          text: isFinal ? txt : '',
+          interim: isFinal ? '' : txt,
+          startTime: now,
+          isComplete: false,
+          id: `${now}_${Math.random().toString(36).slice(2, 8)}`,
+          speakerId,
+        };
+      } else if (isFinal || speechFinal) {
+        const combined = cur.text ? `${cur.text} ${txt}` : txt;
+        updated = { ...cur, text: combined, interim: '', speakerId: cur.speakerId ?? speakerId };
+      } else {
+        updated = { ...cur, interim: txt, speakerId: cur.speakerId ?? speakerId };
+      }
+      currentBlockRef.current = updated;
+      setCurrentBlock(updated);
 
-                    // ── Code Deep Dive ────────────────────────────────────
-                    if (isCodeDeepDiveEnabledRef.current) {
-                      socketRef.current.emit('process_code_deep_dive', {
-                        text: blockText,
-                        roomId: currentRoomId,
-                        blockId: newId
-                      });
-                    }
-
-                    // ── System Design Viewer ──────────────────────────────
-                    if (isSystemDesignEnabledRef.current) {
-                      // Pass recent transcript blocks for cumulative context
-                      const recentBlocks = transcriptsByRoomClientRef.current || [];
-                      socketRef.current.emit('process_system_design', {
-                        text: blockText,
-                        roomId: currentRoomId,
-                        blockId: newId,
-                        recentBlocks
-                      });
-                    }
-
-                  } else {
-                    console.log(`[CLIENT] Skipping duplicate analysis for block ${newId}`);
-                  }
-                } catch (err) {
-                  console.error(`[X] [CLIENT] Error emitting process_with_ai:`, err);
-                }
-              } else {
-                console.log(`[CLIENT] AI Analysis is disabled - skipping analysis for block ${newId} (no API calls, no charges)`);
-              }
-              return next;
-            });
-          }
-          return {
-            text: isFinal ? txt : '',
-            interim: isFinal ? '' : txt,
-            startTime: now,
-            isComplete: false,
-            id: `${now}_${Math.random().toString(36).slice(2,8)}`,
-          };
+      // Phase 1: endpoint-driven trigger — only on a finality signal AND score gate
+      if (isFinal || speechFinal) {
+        const turnText = (updated.text + (updated.interim ? ` ${updated.interim}` : '')).trim();
+        const { score } = calculateTurnAnswerScore(turnText, {
+          isFinal,
+          speechFinal,
+          utteranceEnd: speechFinal,
+          confidence: transcription.confidence ?? 0.9,
+          pauseMs: 0,
+        });
+        if (score >= ANSWER_SCORE_THRESHOLD) {
+          finalizeAndAnalyze('endpoint_score');
         }
-
-        // Update existing block
-        if (isFinal) {
-          const combined = prev.text
-            ? (prev.text.endsWith('.') ? prev.text + ' ' + txt : prev.text + ' ' + txt)
-            : txt;
-          return { ...prev, text: combined, interim: '' };
-        } else if (utteranceEnd) {
-          // Promote interim as a finished sentence when Deepgram marks utterance end
-          const combined = prev.text
-            ? (prev.text.endsWith('.') ? prev.text + ' ' + txt : prev.text + ' ' + txt)
-            : txt;
-          return { ...prev, text: combined, interim: '' };
-        } else {
-          return { ...prev, interim: txt };
-        }
-      });
+      }
     });
 
     // Add error handling
@@ -569,6 +758,16 @@ const TranscriptionRoom = ({ initialService }) => {
     // }, ANALYSIS_INTERVAL);
 
     socketRef.current.on('ai_response', (response) => {
+      // Phase 2: drop stale/superseded turns (barge-in / revise)
+      if (response.turnId) {
+        pendingTurnsRef.current.delete(response.turnId);
+        if (supersededTurnsRef.current.has(response.turnId)) {
+          supersededTurnsRef.current.delete(response.turnId);
+          console.log(`[CLIENT] Dropping superseded ai_response for turn ${response.turnId}`);
+          if (pendingTurnsRef.current.size === 0) setIsAiThinking(false);
+          return;
+        }
+      }
       console.log(`[CLIENT] Received ai_response:`, response);
       console.log(`   Analysis Type: ${response.analysisType}`);
       console.log(`   RAG Used: ${response.ragUsed}`);
@@ -717,6 +916,155 @@ const TranscriptionRoom = ({ initialService }) => {
     });
   };
 
+  const beginTranscriptionSession = () => {
+    setIsProviderLocked(true);
+    setCurrentStep('transcribing');
+    sessionStartRef.current = Date.now();
+    if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+    sessionTimerRef.current = setInterval(() => {
+      setSessionElapsedMs(Date.now() - sessionStartRef.current);
+    }, 1000);
+
+    if (socketRef.current?.id && selectedService) {
+      window.history.pushState(
+        {},
+        '',
+        `/${socketRef.current.id}_${selectedService}`
+      );
+    }
+  };
+
+  const resetTranscriptionSession = () => {
+    setIsAiThinking(false);
+    setCurrentSegment({
+      text: '',
+      startTime: null,
+      timeLeft: 20
+    });
+
+    socketRef.current.emit('stop_transcription', roomId);
+    socketRef.current.emit('stop_ai_processing', roomId);
+
+    if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+    sessionTimerRef.current = null;
+    sessionStartRef.current = null;
+    setSessionElapsedMs(0);
+
+    setIsProviderLocked(false);
+    setCurrentStep('provider');
+    setSelectedService('');
+  };
+
+  const startOneOnOneMeeting = async () => {
+    try {
+      beginTranscriptionSession();
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 44100,
+          channelCount: 1
+        }
+      });
+      micStreamRef.current = stream;
+
+      audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+      const source = audioContextRef.current.createMediaStreamSource(stream);
+
+      const noiseGate = audioContextRef.current.createDynamicsCompressor();
+      noiseGate.threshold.value = -50;
+      noiseGate.knee.value = 40;
+      noiseGate.ratio.value = 12;
+      noiseGate.attack.value = 0;
+      noiseGate.release.value = 0.25;
+
+      const gainNode = audioContextRef.current.createGain();
+      gainNode.gain.value = 1.5;
+
+      await audioContextRef.current.audioWorklet.addModule('/audio-processor.worklet.js');
+      const workletNode = new AudioWorkletNode(audioContextRef.current, 'audio-processor');
+
+      source.connect(noiseGate);
+      noiseGate.connect(gainNode);
+      gainNode.connect(workletNode);
+      workletNode.connect(audioContextRef.current.destination);
+
+      workletNode.port.onmessage = (event) => {
+        const { audioData } = event.data;
+        if (audioData) {
+          const float32Array = new Float32Array(audioData);
+          const int16Array = new Int16Array(float32Array.length);
+
+          for (let i = 0; i < float32Array.length; i++) {
+            let sample = float32Array[i];
+            if (Math.abs(sample) < 0.01) {
+              sample = 0;
+            }
+            const s = Math.max(-1, Math.min(1, sample));
+            int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+
+          debugStatsRef.current.bytesSent += int16Array.byteLength;
+          debugStatsRef.current.chunksSent += 1;
+          debugStatsRef.current.lastEmitTs = Date.now();
+
+          let sum = 0;
+          for (let i = 0; i < int16Array.length; i += 32) {
+            const v = int16Array[i] / 32767;
+            sum += v * v;
+          }
+          const rms = Math.sqrt(sum / Math.max(1, Math.floor(int16Array.length / 32)));
+          setAudioLevel(prev => 0.8 * prev + 0.2 * rms);
+
+          socketRef.current.emit('audio_data', {
+            roomId,
+            audio: int16Array.buffer,
+            isScreenShare: false,
+            service: selectedService
+          });
+        }
+      };
+
+      socketRef.current.emit('start_transcription', {
+        roomId,
+        service: selectedService,
+        meetingMode: 'one-on-one'
+      });
+      setIsRecording(true);
+    } catch (error) {
+      console.error('Error starting 1:1 meeting:', error);
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(track => track.stop());
+        micStreamRef.current = null;
+      }
+      cleanupAudioContext();
+      if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
+      sessionTimerRef.current = null;
+      sessionStartRef.current = null;
+      setSessionElapsedMs(0);
+      setIsProviderLocked(false);
+      setCurrentStep('recording');
+      alert('Error starting microphone: ' + error.message);
+    }
+  };
+
+  const stopOneOnOneMeeting = () => {
+    try {
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(track => track.stop());
+        micStreamRef.current = null;
+      }
+
+      cleanupAudioContext();
+      resetTranscriptionSession();
+      setIsRecording(false);
+    } catch (error) {
+      console.error('Error stopping 1:1 meeting:', error);
+    }
+  };
+
   const startScreenShare = async () => {
     try {
       // Guard: Screen Capture API requires a secure context (HTTPS) or localhost
@@ -730,22 +1078,7 @@ const TranscriptionRoom = ({ initialService }) => {
         return;
       }
 
-      setIsProviderLocked(true);
-      setCurrentStep('transcribing');
-      // Start session timer
-      sessionStartRef.current = Date.now();
-      if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
-      sessionTimerRef.current = setInterval(() => {
-        setSessionElapsedMs(Date.now() - sessionStartRef.current);
-      }, 1000);
-      
-      if (socketRef.current?.id && selectedService) {
-        window.history.pushState(
-          {}, 
-          '', 
-          `/${socketRef.current.id}_${selectedService}`
-        );
-      }
+      beginTranscriptionSession();
 
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: { displaySurface: "browser" },
@@ -883,30 +1216,10 @@ const TranscriptionRoom = ({ initialService }) => {
       
       cleanupAudioContext();
       
-      // Reset AI analysis state
-      setIsAiThinking(false);
-      setCurrentSegment({
-        text: '',
-        startTime: null,
-        timeLeft: 20
-      });
-      
-      // Stop transcription and AI processing
-      socketRef.current.emit('stop_transcription', roomId);
-      socketRef.current.emit('stop_ai_processing', roomId);
+      resetTranscriptionSession();
       
       setIsScreenSharing(false);
       setScreenPreview(null);
-      // Stop session timer
-      if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
-      sessionTimerRef.current = null;
-      sessionStartRef.current = null;
-      setSessionElapsedMs(0);
-      
-      // Reset back to step 1
-      setIsProviderLocked(false);
-      setCurrentStep('provider');
-      setSelectedService('');
     } catch (error) {
       console.error('Error stopping screen share:', error);
     }
@@ -1144,11 +1457,89 @@ const TranscriptionRoom = ({ initialService }) => {
     );
   };
 
+  // Phase 4: speaker profile editing (rename / role / hide)
+  const updateSpeakerProfile = (id, patch) => {
+    setSpeakerProfiles(p => {
+      const cur = p[id] || {
+        speakerId: id,
+        displayName: `Speaker ${(parseInt(id, 10) || 0) + 1}`,
+        role: 'unknown', hidden: false, confidence: 0, lastSeenAt: Date.now(), totalSpeechMs: 0,
+      };
+      return { ...p, [id]: { ...cur, ...patch } };
+    });
+  };
+
+  const renderSpeakerControls = () => {
+    const ids = Object.keys(speakerProfiles).sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+    return (
+      <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-2">
+        <div className="flex items-center justify-between mb-2 gap-2">
+          <span className="text-[11px] font-medium text-muted-foreground flex items-center gap-1">
+            <Users className="h-3.5 w-3.5" /> Speakers
+          </span>
+          <select
+            value={captureMode}
+            onChange={(e) => setCaptureMode(e.target.value)}
+            className="text-[11px] bg-background border border-white/15 rounded px-1.5 py-0.5 text-foreground"
+            title="Capture mode"
+          >
+            {CAPTURE_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </div>
+        {ids.length === 0 ? (
+          <p className="text-[11px] text-muted-foreground">No speakers detected yet. Diarization labels appear as people speak.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {ids.map(id => {
+              const p = speakerProfiles[id];
+              return (
+                <div key={id} className="flex items-center gap-1.5">
+                  <input
+                    value={p.displayName}
+                    onChange={(e) => updateSpeakerProfile(id, { displayName: e.target.value })}
+                    className="flex-1 min-w-0 text-[11px] bg-background border border-white/15 rounded px-1.5 py-0.5 text-foreground"
+                    placeholder={`Speaker ${(parseInt(id, 10) || 0) + 1}`}
+                  />
+                  <select
+                    value={p.role}
+                    onChange={(e) => updateSpeakerProfile(id, { role: e.target.value })}
+                    className="text-[11px] bg-background border border-white/15 rounded px-1 py-0.5 text-foreground"
+                    title="Role"
+                  >
+                    {SPEAKER_ROLES.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => updateSpeakerProfile(id, { hidden: !p.hidden })}
+                    className={cn(
+                      'flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border transition-colors',
+                      p.hidden
+                        ? 'border-red-500/30 text-red-300 bg-red-500/10'
+                        : 'border-white/15 text-white/60 hover:text-white'
+                    )}
+                    title={p.hidden ? 'Hidden from AI — click to show' : 'Visible to AI — click to hide'}
+                  >
+                    {p.hidden ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+                    {p.hidden ? 'Hidden' : 'Active'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderTranscripts = () => {
     if (transcriptBlocks.length === 0 && !currentBlock.text) {
       return (
         <div className="text-center text-muted-foreground py-12">
-          <p>Start recording or share your screen to begin transcription...</p>
+          <p>
+            {meetingMode === 'one-on-one'
+              ? 'Start with your laptop microphone to begin transcription...'
+              : 'Start recording or share your screen to begin transcription...'}
+          </p>
         </div>
       );
     }
@@ -1199,16 +1590,40 @@ const TranscriptionRoom = ({ initialService }) => {
       });
     };
 
+    const roleColor = (role) => (
+      role === 'me' ? 'bg-blue-500/15 text-blue-300 border-blue-500/30'
+      : role === 'interviewer' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+      : role === 'customer' ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+      : 'bg-white/5 text-white/60 border-white/15'
+    );
+
     return (
       <>
-        {transcriptBlocks.map((block, index) => (
-          <Card key={index} className="mb-4 relative">
-            <CardContent className="pt-6">
-              {renderFormattedText(block.text)}
-            </CardContent>
-            <CopyButton text={block.text} />
-          </Card>
-        ))}
+        {transcriptBlocks.map((block, index) => {
+          const label = block.displayName || (block.speakerId != null ? `Speaker ${(parseInt(block.speakerId, 10) || 0) + 1}` : null);
+          if (block.hidden) {
+            // Collapsed marker — hidden speaker is never analyzed
+            return (
+              <div key={index} className="mb-2 px-3 py-1.5 rounded-md border border-white/10 bg-white/[0.02] text-[11px] text-muted-foreground flex items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-white/30" />
+                {label || 'Hidden speaker'} spoke — hidden from AI
+              </div>
+            );
+          }
+          return (
+            <Card key={index} className="mb-4 relative">
+              <CardContent className="pt-6">
+                {label && (
+                  <Badge variant="outline" className={cn('mb-2 text-[11px]', roleColor(block.role))}>
+                    {label}{block.role && block.role !== 'unknown' ? ` · ${block.role}` : ''}
+                  </Badge>
+                )}
+                {renderFormattedText(block.text)}
+              </CardContent>
+              <CopyButton text={block.text} />
+            </Card>
+          );
+        })}
         {currentBlock.text && (
           <Card className="mb-4 border-primary/50">
             <CardContent className="pt-6">
@@ -1364,6 +1779,8 @@ const TranscriptionRoom = ({ initialService }) => {
               isProviderLocked={isProviderLocked}
               selectedAgent={selectedAgent}
               onAgentChange={setSelectedAgent}
+              meetingMode={meetingMode}
+              setMeetingMode={setMeetingMode}
               roomContext={roomContext}
               socket={socketRef.current}
               roomId={roomId}
@@ -1391,6 +1808,7 @@ const TranscriptionRoom = ({ initialService }) => {
                     )}
                   </Badge>
                 </div>
+                {renderSpeakerControls()}
               </CardHeader>
               <CardContent className="flex flex-col h-[calc(100%-5rem)]">
                 {/* Screen Preview */}
@@ -1442,12 +1860,49 @@ const TranscriptionRoom = ({ initialService }) => {
                             </Button>
                           </div>
                         </>
+                      ) : isRecording && meetingMode === 'one-on-one' ? (
+                        <div className="flex flex-col items-center justify-center h-full p-6 text-center">
+                          <div className="relative mb-4">
+                            <Mic className="h-16 w-16 text-primary" />
+                            <span className="absolute -top-1 -right-1 h-4 w-4 bg-red-500 rounded-full animate-pulse" />
+                          </div>
+                          <Badge variant="destructive" className="mb-2">
+                            <span className="h-2 w-2 bg-red-500 rounded-full mr-2 animate-pulse" />
+                            Live — 1:1 Microphone
+                          </Badge>
+                          <p className="text-sm text-muted-foreground mb-4">
+                            Transcribing from your laptop microphone
+                          </p>
+                          <Badge variant="secondary" className="mb-4">
+                            {selectedService === 'deepgram' ? 'Deepgram' :
+                             selectedService === 'openai' ? 'OpenAI' : 'Google Cloud'}
+                          </Badge>
+                          <Button size="sm" variant="secondary" onClick={stopOneOnOneMeeting}>
+                            <StopCircle className="h-4 w-4 mr-1" />
+                            Stop
+                          </Button>
+                        </div>
                       ) : (
                         <div className="flex items-center justify-center h-full">
                           {currentStep === 'provider' ? (
                             <div className="text-center p-4">
                               <SettingsIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
                               <p className="text-muted-foreground">Please select a provider first</p>
+                            </div>
+                          ) : meetingMode === 'one-on-one' ? (
+                            <div className="text-center p-4 space-y-4">
+                              <Mic className="h-12 w-12 mx-auto text-primary" />
+                              <p className="text-sm text-muted-foreground max-w-xs">
+                                1:1 mode uses your laptop microphone — no screen or tab selection needed.
+                              </p>
+                              <Button
+                                onClick={startOneOnOneMeeting}
+                                disabled={!selectedService}
+                                size="lg"
+                              >
+                                <Mic className="h-5 w-5 mr-2" />
+                                Start with Microphone
+                              </Button>
                             </div>
                           ) : (
                             <Button
