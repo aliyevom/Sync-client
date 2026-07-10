@@ -40,6 +40,32 @@ const CAPTURE_MODES = [
   { id: 'only_interviewer', label: 'Only interviewer/customer' },
   { id: 'coach', label: 'Private coach mode' },
 ];
+const DEFAULT_TRANSCRIPTION_SERVICE = 'speechmatics';
+
+const getServiceLabel = (service) => ({
+  speechmatics: 'Speechmatics',
+  deepgram: 'Deepgram',
+  openai: 'OpenAI',
+  google: 'Google Cloud',
+}[service] || 'No provider');
+
+const isSelfSpeakerId = (id) => String(id || '').toLowerCase() === 'me';
+
+const formatSpeakerDisplayName = (id, fallbackIndex = 0) => {
+  const value = String(id ?? '');
+  if (isSelfSpeakerId(value)) return 'Me';
+  if (/^S\d+$/i.test(value)) return `Speaker ${value.slice(1)}`;
+  if (/^\d+$/.test(value)) return `Speaker ${(parseInt(value, 10) || 0) + 1}`;
+  return `Speaker ${fallbackIndex + 1}`;
+};
+
+const speakerSortValue = (id) => {
+  const value = String(id ?? '');
+  if (isSelfSpeakerId(value)) return -1;
+  if (/^S\d+$/i.test(value)) return parseInt(value.slice(1), 10);
+  if (/^\d+$/.test(value)) return parseInt(value, 10) + 1;
+  return Number.MAX_SAFE_INTEGER;
+};
 
 // Cheap stable hash for duplicate-turn protection
 const hashText = (s) => {
@@ -48,26 +74,76 @@ const hashText = (s) => {
   return String(h);
 };
 
-// Semantic Incremental Turn-Taking score (Phase 1).
-// pause only RAISES confidence; it never triggers an answer on its own.
-const calculateTurnAnswerScore = (text, { isFinal, speechFinal, utteranceEnd, confidence = 0.9, pauseMs = 0 }) => {
+const QUESTION_START_RE = /^(what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did|tell|explain|walk|describe)\b/i;
+const ACTIONABLE_RE = /\b(can you|could you|would you|tell me|explain|walk me|describe|how would|what would|why would|do you|have you|show me|prove to me|design|debug|fix|implement|compare|recommend|help me|what's your|what is your)\b/i;
+const TRAILING_FRAGMENT_RE = /(\b(and|or|but|because|so|then|if|when|where|which|that|to|for|with|about|like|as|from|by|of|in|on|at|the|a|an)\b|[,;:])$/i;
+const MEANING_FAST_DELAY_MS = 850;
+const MEANING_NORMAL_DELAY_MS = 1800;
+const MEANING_LONG_PAUSE_MS = 5200;
+const MEANING_MAX_WAIT_MS = 12000;
+
+const analyzeMeaningReadiness = (text, { pauseMs = 0, elapsedMs = 0, boundary = false } = {}) => {
   const t = (text || '').trim();
-  const words = t ? t.split(/\s+/) : [];
-  let sem;
-  if (/[.?!]$/.test(t)) sem = 1.0;
-  else if (/^(what|why|how|when|where|who|which|can|could|would|should|is|are|do|does|did|tell|explain|walk|describe)\b/i.test(t) && words.length >= 5) sem = 0.8;
-  else if (words.length >= 8) sem = 0.6;
-  else if (words.length >= 4) sem = 0.4;
-  else sem = 0.2;
-  const intent = Math.max(0, Math.min(1, confidence));
-  const stab = isFinal ? 1 : 0.5;
-  const pause = Math.max(0, Math.min(1, pauseMs / 1500));
-  const finished = (speechFinal || utteranceEnd) ? 1 : 0;
-  const score = 0.35 * sem + 0.25 * intent + 0.15 * stab + 0.15 * pause + 0.10 * finished;
-  return { score, semanticCompleteness: sem };
+  const words = t ? t.split(/\s+/).filter(Boolean) : [];
+  const wordCount = words.length;
+  const completeEnding = /[.?!]["')\]]*$/.test(t);
+  const questionLike = /\?["')\]]*$/.test(t) || QUESTION_START_RE.test(t) || ACTIONABLE_RE.test(t);
+  const actionable = questionLike || ACTIONABLE_RE.test(t);
+  const fragmentEnding = TRAILING_FRAGMENT_RE.test(t);
+
+  if (wordCount < 4) {
+    return { analyze: false, releaseTranscript: false, delayMs: MEANING_NORMAL_DELAY_MS };
+  }
+
+  if (fragmentEnding && elapsedMs < MEANING_MAX_WAIT_MS) {
+    return { analyze: false, releaseTranscript: false, delayMs: MEANING_NORMAL_DELAY_MS };
+  }
+
+  if (questionLike && wordCount >= 6 && (completeEnding || pauseMs >= 900 || boundary)) {
+    return { analyze: true, releaseTranscript: true, delayMs: MEANING_FAST_DELAY_MS };
+  }
+
+  if (actionable && wordCount >= 8 && (pauseMs >= 1300 || boundary || (completeEnding && wordCount >= 12))) {
+    return { analyze: true, releaseTranscript: true, delayMs: MEANING_FAST_DELAY_MS };
+  }
+
+  if (wordCount >= 24 && completeEnding && pauseMs >= 2200) {
+    return { analyze: true, releaseTranscript: true, delayMs: MEANING_NORMAL_DELAY_MS };
+  }
+
+  if (elapsedMs >= MEANING_MAX_WAIT_MS && wordCount >= 10 && !fragmentEnding) {
+    return { analyze: true, releaseTranscript: true, delayMs: MEANING_FAST_DELAY_MS };
+  }
+
+  if (pauseMs >= MEANING_LONG_PAUSE_MS && completeEnding) {
+    return { analyze: false, releaseTranscript: true, delayMs: MEANING_FAST_DELAY_MS };
+  }
+
+  return { analyze: false, releaseTranscript: false, delayMs: questionLike ? MEANING_FAST_DELAY_MS : MEANING_NORMAL_DELAY_MS };
+};
+
+const getFocusableHistoryEntries = (blocks) =>
+  blocks
+    .map((block, index) => ({ block, index }))
+    .filter(({ block }) => block && !block.hidden);
+
+const resolveFocusableHistoryIndex = (blocks, requestedIndex = null) => {
+  const entries = getFocusableHistoryEntries(blocks);
+  if (entries.length === 0) return null;
+
+  if (requestedIndex !== null && requestedIndex !== undefined) {
+    const exact = entries.find(({ index }) => index === requestedIndex);
+    if (exact) return exact.index;
+
+    const previous = [...entries].reverse().find(({ index }) => index < requestedIndex);
+    if (previous) return previous.index;
+  }
+
+  return entries[entries.length - 1].index;
 };
 
 const TranscriptionRoom = ({ initialService }) => {
+  const defaultService = initialService || DEFAULT_TRANSCRIPTION_SERVICE;
   const [isRecording, setIsRecording] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [aiResponses, setAiResponses] = useState([]);
@@ -87,8 +163,8 @@ const TranscriptionRoom = ({ initialService }) => {
     timeLeft: 20
   });
   const [screenPreview, setScreenPreview] = useState(null);
-  const [selectedService, setSelectedService] = useState(initialService || '');
-  const [currentStep, setCurrentStep] = useState('provider'); // 'provider', 'recording', 'transcribing'
+  const [selectedService, setSelectedService] = useState(defaultService);
+  const [currentStep, setCurrentStep] = useState(defaultService ? 'recording' : 'provider'); // 'provider', 'recording', 'transcribing'
   const [meetingMode, setMeetingMode] = useState(() => {
     try {
       const saved = localStorage.getItem('meeting_mode');
@@ -140,7 +216,7 @@ const TranscriptionRoom = ({ initialService }) => {
 
   // When entering full view, snap to the latest block
   const openFullView = () => {
-    setFullViewBlockIdx(transcriptBlocks.length > 0 ? transcriptBlocks.length - 1 : null);
+    setFullViewBlockIdx(resolveFocusableHistoryIndex(transcriptBlocks));
     setIsFullView(true);
   };
 
@@ -222,6 +298,7 @@ const TranscriptionRoom = ({ initialService }) => {
     text: '',
     interim: '',
     startTime: null,
+    updatedAt: null,
     isComplete: false,
     id: null,
     speakerId: null
@@ -262,9 +339,9 @@ const TranscriptionRoom = ({ initialService }) => {
   const selectedAgentRef = useRef('MEETING_ANALYST');
 
   // ── Phase 1/2: Semantic Incremental Turn-Taking Controller ───────────────
-  const ANSWER_SCORE_THRESHOLD = 0.85;
   const MAX_TURN_MS = 20000; // fallback max-turn cap
-  const currentBlockRef = useRef({ text: '', interim: '', startTime: null, isComplete: false, id: null, speakerId: null });
+  const currentBlockRef = useRef({ text: '', interim: '', startTime: null, updatedAt: null, isComplete: false, id: null, speakerId: null });
+  const meaningFlushTimerRef = useRef(null);
   const activeTurnIdRef = useRef(null);
   const pendingTurnsRef = useRef(new Set());      // turnIds awaiting an AI response
   const supersededTurnsRef = useRef(new Set());   // turnIds whose answers must be dropped (revise/barge-in)
@@ -508,11 +585,12 @@ const TranscriptionRoom = ({ initialService }) => {
       const id = String(speakerId ?? 0);
       if (speakerProfilesRef.current[id]) return;
       const idx = Object.keys(speakerProfilesRef.current).length;
+      const isSelf = isSelfSpeakerId(id);
       const def = {
         speakerId: id,
-        displayName: `Speaker ${idx + 1}`,
-        role: 'unknown',
-        hidden: false,
+        displayName: isSelf ? 'Me' : formatSpeakerDisplayName(id, idx),
+        role: isSelf ? 'me' : 'unknown',
+        hidden: isSelf,
         confidence: 0,
         lastSeenAt: Date.now(),
         totalSpeechMs: 0,
@@ -525,7 +603,8 @@ const TranscriptionRoom = ({ initialService }) => {
     // Resolve display + effective hidden flag (explicit flag + capture mode).
     const resolveSpeaker = (speakerId) => {
       const id = String(speakerId ?? 0);
-      const p = speakerProfilesRef.current[id] || { displayName: `Speaker ${(parseInt(id, 10) || 0) + 1}`, role: 'unknown', hidden: false };
+      const fallback = { displayName: formatSpeakerDisplayName(id), role: isSelfSpeakerId(id) ? 'me' : 'unknown', hidden: isSelfSpeakerId(id) };
+      const p = speakerProfilesRef.current[id] || fallback;
       const mode = captureModeRef.current;
       let hidden = !!p.hidden;
       if (mode === 'ignore_self' || mode === 'coach') {
@@ -534,7 +613,7 @@ const TranscriptionRoom = ({ initialService }) => {
       if (mode === 'only_interviewer') {
         if (!['interviewer', 'customer', 'instructor'].includes(p.role)) hidden = true;
       }
-      return { id, displayName: p.displayName || `Speaker ${(parseInt(id, 10) || 0) + 1}`, role: p.role || 'unknown', hidden };
+      return { id, displayName: p.displayName || formatSpeakerDisplayName(id), role: p.role || 'unknown', hidden };
     };
 
     const touchSpeaker = (id, block) => {
@@ -546,8 +625,65 @@ const TranscriptionRoom = ({ initialService }) => {
       });
     };
 
-    // ── Phase 1/2: finalize the current turn, gate + trigger AI ──────────
-    const finalizeAndAnalyze = (reason) => {
+    const clearMeaningFlushTimer = () => {
+      if (meaningFlushTimerRef.current) {
+        clearTimeout(meaningFlushTimerRef.current);
+        meaningFlushTimerRef.current = null;
+      }
+    };
+
+    const emitAnalysisForBlock = (block, reason) => {
+      if (!block || !block.text || block.hidden) return;
+      if (!isAiAnalysisEnabledRef.current) return;
+      if (processedBlocksRef.current.has(block.turnId)) return;
+      processedBlocksRef.current.add(block.turnId);
+
+      const now = Date.now();
+      const last = lastFinalizeRef.current;
+      if (last && last.speakerId === block.speakerId && (now - last.at) < 2000 && pendingTurnsRef.current.has(last.turnId)) {
+        supersededTurnsRef.current.add(last.turnId);
+        console.log(`[CLIENT] Superseding stale turn ${last.turnId} (continued by ${block.displayName})`);
+      }
+      lastFinalizeRef.current = { turnId: block.turnId, speakerId: block.speakerId, at: now };
+      activeTurnIdRef.current = block.turnId;
+      pendingTurnsRef.current.add(block.turnId);
+
+      setTranscriptBlocks(blocks =>
+        blocks.map(item => item.turnId === block.turnId ? { ...item, aiTriggered: true, analysisReason: reason } : item)
+      );
+
+      const currentRoomId = socketRef.current?.id || roomId;
+      const clientHistory = transcriptsByRoomClientRef.current;
+      clientHistory.push(block.text);
+      if (clientHistory.length > 20) clientHistory.splice(0, clientHistory.length - 20);
+
+      try {
+        setIsAiThinking(true);
+        socketRef.current.emit('process_with_ai', {
+          text: block.text,
+          roomId: currentRoomId,
+          agentType: selectedAgentRef.current,
+          blockId: block.turnId,
+          turnId: block.turnId,
+          speakerId: block.speakerId,
+          displayName: block.displayName,
+          hidden: false,
+          useRAG: Boolean(useRAGRef.current),
+        });
+        if (isCodeDeepDiveEnabledRef.current) {
+          socketRef.current.emit('process_code_deep_dive', { text: block.text, roomId: currentRoomId, blockId: block.turnId });
+        }
+        if (isSystemDesignEnabledRef.current) {
+          socketRef.current.emit('process_system_design', { text: block.text, roomId: currentRoomId, blockId: block.turnId, recentBlocks: transcriptsByRoomClientRef.current || [] });
+        }
+      } catch (err) {
+        console.error('[X] [CLIENT] Error emitting process_with_ai:', err);
+      }
+    };
+
+    // ── Phase 1/2: finalize the current meaning unit, optionally trigger AI ─
+    const finalizeAndAnalyze = (reason, { analyze = false } = {}) => {
+      clearMeaningFlushTimer();
       const prev = currentBlockRef.current;
       if (!prev || (!prev.text && !prev.interim)) return;
       const blockText = (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim();
@@ -557,7 +693,7 @@ const TranscriptionRoom = ({ initialService }) => {
       const textHash = hashText(blockText);
       if (lastFinalizedHashRef.current === textHash) {
         // identical to last finalized turn — reset and bail (duplicate protection)
-        const empty = { text: '', interim: '', startTime: null, isComplete: false, id: null, speakerId: null };
+        const empty = { text: '', interim: '', startTime: null, updatedAt: null, isComplete: false, id: null, speakerId: null };
         currentBlockRef.current = empty; setCurrentBlock(empty);
         return;
       }
@@ -565,30 +701,37 @@ const TranscriptionRoom = ({ initialService }) => {
 
       const speaker = resolveSpeaker(prev.speakerId);
 
+      const shouldFocusTurn = !speaker.hidden;
+      const finalizedBlock = {
+        ...prev,
+        text: blockText,
+        interim: '',
+        isComplete: true,
+        id: turnId,
+        turnId,
+        speakerId: speaker.id,
+        displayName: speaker.displayName,
+        role: speaker.role,
+        hidden: speaker.hidden,
+        aiTriggered: false,
+        analysisReason: null,
+        finalizedReason: reason,
+      };
+
       // Append finalized turn to the visible transcript (with speaker metadata)
       setTranscriptBlocks(blocks => {
-        const next = [...blocks, {
-          ...prev,
-          text: blockText,
-          interim: '',
-          isComplete: true,
-          id: turnId,
-          turnId,
-          speakerId: speaker.id,
-          displayName: speaker.displayName,
-          role: speaker.role,
-          hidden: speaker.hidden,
-          aiTriggered: !speaker.hidden && isAiAnalysisEnabledRef.current,
-        }];
-        setHistoryIdx(next.length - 1);
-        setHistoryStage('new');
-        setTimeout(() => setHistoryStage('warn'), 1500);
+        const next = [...blocks, finalizedBlock];
+        if (shouldFocusTurn) {
+          setHistoryIdx(next.length - 1);
+          setHistoryStage('new');
+          setTimeout(() => setHistoryStage('warn'), 1500);
+        }
         return next;
       });
       touchSpeaker(speaker.id, prev);
 
       // Reset current block for the next turn
-      const empty = { text: '', interim: '', startTime: null, isComplete: false, id: null, speakerId: null };
+      const empty = { text: '', interim: '', startTime: null, updatedAt: null, isComplete: false, id: null, speakerId: null };
       currentBlockRef.current = empty; setCurrentBlock(empty);
 
       // Hidden speaker: show transcript only — never send to AI or rolling context
@@ -596,60 +739,69 @@ const TranscriptionRoom = ({ initialService }) => {
         console.log(`[CLIENT] Hidden speaker (${speaker.displayName}) — turn ${turnId} not analyzed [${reason}]`);
         return;
       }
-      if (!isAiAnalysisEnabledRef.current) return;
-      if (processedBlocksRef.current.has(turnId)) return;
-      processedBlocksRef.current.add(turnId);
 
-      // Phase 2: barge-in / revise — if the same speaker continues within 2s and the
-      // previous turn's answer is still pending, supersede it so the stale answer is dropped.
+      if (analyze) {
+        emitAnalysisForBlock(finalizedBlock, reason);
+      }
+    };
+
+    const scheduleMeaningFlush = (reason, { boundary = false } = {}) => {
+      clearMeaningFlushTimer();
+      const block = currentBlockRef.current;
+      const text = (block?.text + (block?.interim ? ` ${block.interim}` : '')).trim();
+      if (!text) return;
+
+      const speaker = resolveSpeaker(block.speakerId);
       const now = Date.now();
-      const last = lastFinalizeRef.current;
-      if (last && last.speakerId === speaker.id && (now - last.at) < 2000 && pendingTurnsRef.current.has(last.turnId)) {
-        supersededTurnsRef.current.add(last.turnId);
-        console.log(`[CLIENT] Superseding stale turn ${last.turnId} (revise by ${speaker.displayName})`);
+      const pauseMs = now - (block.updatedAt || block.startTime || now);
+      const elapsedMs = now - (block.startTime || now);
+      const readiness = analyzeMeaningReadiness(text, { pauseMs, elapsedMs, boundary });
+
+      if (speaker.hidden) {
+        meaningFlushTimerRef.current = setTimeout(() => finalizeAndAnalyze(`hidden_${reason}`, { analyze: false }), 700);
+        return;
       }
-      lastFinalizeRef.current = { turnId, speakerId: speaker.id, at: now };
-      activeTurnIdRef.current = turnId;
-      pendingTurnsRef.current.add(turnId);
 
-      const currentRoomId = socketRef.current?.id || roomId;
-      const clientHistory = transcriptsByRoomClientRef.current;
-      clientHistory.push(blockText);
-      if (clientHistory.length > 20) clientHistory.splice(0, clientHistory.length - 20);
+      if (readiness.analyze || readiness.releaseTranscript) {
+        const delayMs = boundary ? 250 : readiness.delayMs;
+        meaningFlushTimerRef.current = setTimeout(() => {
+          const latest = currentBlockRef.current;
+          if (!latest || (!latest.text && !latest.interim)) return;
+          const latestText = (latest?.text + (latest?.interim ? ` ${latest.interim}` : '')).trim();
+          const latestNow = Date.now();
+          const latestDecision = analyzeMeaningReadiness(latestText, {
+            pauseMs: latestNow - (latest.updatedAt || latest.startTime || latestNow),
+            elapsedMs: latestNow - (latest.startTime || latestNow),
+            boundary,
+          });
+          finalizeAndAnalyze(reason, { analyze: latestDecision.analyze });
+        }, delayMs);
+        return;
+      }
 
-      try {
-        setIsAiThinking(true);
-        socketRef.current.emit('process_with_ai', {
-          text: blockText,
-          roomId: currentRoomId,
-          agentType: selectedAgentRef.current,
-          blockId: turnId,
-          turnId,
-          speakerId: speaker.id,
-          displayName: speaker.displayName,
-          hidden: false,
-          useRAG: Boolean(useRAGRef.current),
+      meaningFlushTimerRef.current = setTimeout(() => {
+        const latest = currentBlockRef.current;
+        if (!latest || (!latest.text && !latest.interim)) return;
+        const latestText = (latest.text + (latest.interim ? ` ${latest.interim}` : '')).trim();
+        const latestNow = Date.now();
+        const latestDecision = analyzeMeaningReadiness(latestText, {
+          pauseMs: latestNow - (latest.updatedAt || latest.startTime || latestNow),
+          elapsedMs: latestNow - (latest.startTime || latestNow),
+          boundary: false,
         });
-        if (isCodeDeepDiveEnabledRef.current) {
-          socketRef.current.emit('process_code_deep_dive', { text: blockText, roomId: currentRoomId, blockId: turnId });
+        if (latestDecision.analyze || latestDecision.releaseTranscript) {
+          finalizeAndAnalyze(reason, { analyze: latestDecision.analyze });
+        } else {
+          scheduleMeaningFlush('meaning_wait');
         }
-        if (isSystemDesignEnabledRef.current) {
-          socketRef.current.emit('process_system_design', { text: blockText, roomId: currentRoomId, blockId: turnId, recentBlocks: transcriptsByRoomClientRef.current || [] });
-        }
-      } catch (err) {
-        console.error('[X] [CLIENT] Error emitting process_with_ai:', err);
-      }
+      }, readiness.delayMs);
     };
 
     // ── Phase 1: end-of-turn signal from Deepgram (UtteranceEnd) ─────────
     socketRef.current.on('utterance_end', () => {
       const cur = currentBlockRef.current;
       if (!cur || (!cur.text && !cur.interim)) return;
-      const turnText = (cur.text + (cur.interim ? ` ${cur.interim}` : '')).trim();
-      const { score } = calculateTurnAnswerScore(turnText, { isFinal: true, speechFinal: true, utteranceEnd: true, confidence: 0.9, pauseMs: 1000 });
-      if (score >= ANSWER_SCORE_THRESHOLD) {
-        finalizeAndAnalyze('utterance_end');
-      }
+      scheduleMeaningFlush('utterance_end', { boundary: true });
     });
 
     socketRef.current.on('transcription', (transcription) => {
@@ -659,7 +811,7 @@ const TranscriptionRoom = ({ initialService }) => {
       const speechFinal = Boolean(transcription.speechFinal);
       const txt = transcription.text.trim();
       if (!txt) return;
-      const speakerId = (typeof transcription.speakerTag === 'number') ? transcription.speakerTag : 0;
+      const speakerId = String(transcription.speakerTag ?? transcription.speaker ?? 0);
       ensureSpeakerProfile(speakerId);
 
       // Debug stats & metadata
@@ -684,7 +836,13 @@ const TranscriptionRoom = ({ initialService }) => {
 
       // Speaker boundary or max-turn cap → finalize the previous turn first
       if (speakerChanged || tooOld) {
-        finalizeAndAnalyze(speakerChanged ? 'speaker_change' : 'max_turn');
+        const prevText = (prev.text + (prev.interim ? ` ${prev.interim}` : '')).trim();
+        const prevDecision = analyzeMeaningReadiness(prevText, {
+          pauseMs: now - (prev.updatedAt || prev.startTime || now),
+          elapsedMs: now - (prev.startTime || now),
+          boundary: true,
+        });
+        finalizeAndAnalyze(speakerChanged ? 'speaker_change' : 'max_turn', { analyze: prevDecision.analyze });
       }
 
       // Accumulate into the current turn
@@ -695,32 +853,24 @@ const TranscriptionRoom = ({ initialService }) => {
           text: isFinal ? txt : '',
           interim: isFinal ? '' : txt,
           startTime: now,
+          updatedAt: now,
           isComplete: false,
           id: `${now}_${Math.random().toString(36).slice(2, 8)}`,
           speakerId,
         };
       } else if (isFinal || speechFinal) {
         const combined = cur.text ? `${cur.text} ${txt}` : txt;
-        updated = { ...cur, text: combined, interim: '', speakerId: cur.speakerId ?? speakerId };
+        updated = { ...cur, text: combined, interim: '', speakerId: cur.speakerId ?? speakerId, updatedAt: now };
       } else {
-        updated = { ...cur, interim: txt, speakerId: cur.speakerId ?? speakerId };
+        updated = { ...cur, interim: txt, speakerId: cur.speakerId ?? speakerId, updatedAt: now };
       }
       currentBlockRef.current = updated;
       setCurrentBlock(updated);
 
-      // Phase 1: endpoint-driven trigger — only on a finality signal AND score gate
+      // Stable ASR chunks feed the meaning gate; they do not automatically trigger AI.
       if (isFinal || speechFinal) {
-        const turnText = (updated.text + (updated.interim ? ` ${updated.interim}` : '')).trim();
-        const { score } = calculateTurnAnswerScore(turnText, {
-          isFinal,
-          speechFinal,
-          utteranceEnd: speechFinal,
-          confidence: transcription.confidence ?? 0.9,
-          pauseMs: 0,
-        });
-        if (score >= ANSWER_SCORE_THRESHOLD) {
-          finalizeAndAnalyze('endpoint_score');
-        }
+        const isSpeechmaticsStableChunk = transcription.service === 'speechmatics';
+        scheduleMeaningFlush('endpoint_score', { boundary: Boolean(speechFinal && !isSpeechmaticsStableChunk) });
       }
     });
 
@@ -883,6 +1033,7 @@ const TranscriptionRoom = ({ initialService }) => {
       clearInterval(countdownInterval);
       if (analysisInterval) clearInterval(analysisInterval); // Safely clear if exists
       clearInterval(dbgTicker);
+      clearMeaningFlushTimer();
       if (socketRef.current) {
         window.history.pushState({}, '', '/');
         socketRef.current.disconnect();
@@ -1462,15 +1613,22 @@ const TranscriptionRoom = ({ initialService }) => {
     setSpeakerProfiles(p => {
       const cur = p[id] || {
         speakerId: id,
-        displayName: `Speaker ${(parseInt(id, 10) || 0) + 1}`,
-        role: 'unknown', hidden: false, confidence: 0, lastSeenAt: Date.now(), totalSpeechMs: 0,
+        displayName: formatSpeakerDisplayName(id),
+        role: isSelfSpeakerId(id) ? 'me' : 'unknown',
+        hidden: isSelfSpeakerId(id),
+        confidence: 0,
+        lastSeenAt: Date.now(),
+        totalSpeechMs: 0,
       };
-      return { ...p, [id]: { ...cur, ...patch } };
+      const nextProfile = { ...cur, ...patch };
+      const next = { ...p, [id]: nextProfile };
+      speakerProfilesRef.current = next;
+      return next;
     });
   };
 
   const renderSpeakerControls = () => {
-    const ids = Object.keys(speakerProfiles).sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+    const ids = Object.keys(speakerProfiles).sort((a, b) => speakerSortValue(a) - speakerSortValue(b));
     return (
       <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.02] p-2">
         <div className="flex items-center justify-between mb-2 gap-2">
@@ -1498,7 +1656,7 @@ const TranscriptionRoom = ({ initialService }) => {
                     value={p.displayName}
                     onChange={(e) => updateSpeakerProfile(id, { displayName: e.target.value })}
                     className="flex-1 min-w-0 text-[11px] bg-background border border-white/15 rounded px-1.5 py-0.5 text-foreground"
-                    placeholder={`Speaker ${(parseInt(id, 10) || 0) + 1}`}
+                    placeholder={formatSpeakerDisplayName(id)}
                   />
                   <select
                     value={p.role}
@@ -1635,6 +1793,18 @@ const TranscriptionRoom = ({ initialService }) => {
     );
   };
 
+  const historyEntries = getFocusableHistoryEntries(transcriptBlocks);
+  const selectedHistoryIdx = resolveFocusableHistoryIndex(transcriptBlocks, historyIdx);
+  const selectedHistoryOrdinal = historyEntries.findIndex(({ index }) => index === selectedHistoryIdx);
+  const selectedHistoryBlock = selectedHistoryIdx !== null ? transcriptBlocks[selectedHistoryIdx] : null;
+  const selectHistoryByOffset = (offset) => {
+    if (historyEntries.length === 0) return;
+    const currentOrdinal = selectedHistoryOrdinal >= 0 ? selectedHistoryOrdinal : historyEntries.length - 1;
+    const nextOrdinal = Math.max(0, Math.min(historyEntries.length - 1, currentOrdinal + offset));
+    setHistoryIdx(historyEntries[nextOrdinal].index);
+    setHistoryStage('idle');
+  };
+
   return (
     <div className="min-h-screen bg-background p-4 lg:p-6">
       <div className="max-w-[1600px] mx-auto">
@@ -1680,11 +1850,12 @@ const TranscriptionRoom = ({ initialService }) => {
             {/* Provider pill */}
             <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.06] border border-white/15 text-[11px]">
               {selectedService === 'deepgram' && <span className="h-1.5 w-1.5 rounded-full bg-sky-400 shrink-0" />}
+              {selectedService === 'speechmatics' && <span className="h-1.5 w-1.5 rounded-full bg-fuchsia-400 shrink-0" />}
               {selectedService === 'openai'   && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />}
               {selectedService === 'google'   && <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 shrink-0" />}
               {!selectedService               && <span className="h-1.5 w-1.5 rounded-full bg-white/30 shrink-0" />}
               <span className="font-bold text-[#f5f0e8]">
-                {selectedService === 'deepgram' ? 'Deepgram' : selectedService === 'openai' ? 'OpenAI' : selectedService === 'google' ? 'Google Cloud' : 'No provider'}
+                {getServiceLabel(selectedService)}
               </span>
             </div>
 
@@ -1830,8 +2001,7 @@ const TranscriptionRoom = ({ initialService }) => {
                               Live
                             </Badge>
                             <Badge variant="secondary">
-                              {selectedService === 'deepgram' ? 'Deepgram' : 
-                               selectedService === 'openai' ? 'OpenAI' : 'Google Cloud'}
+                              {getServiceLabel(selectedService)}
                             </Badge>
                           </div>
                           {debugMode && isOverlayVisible && (currentBlock.text || currentBlock.interim) && (
@@ -1874,8 +2044,7 @@ const TranscriptionRoom = ({ initialService }) => {
                             Transcribing from your laptop microphone
                           </p>
                           <Badge variant="secondary" className="mb-4">
-                            {selectedService === 'deepgram' ? 'Deepgram' :
-                             selectedService === 'openai' ? 'OpenAI' : 'Google Cloud'}
+                            {getServiceLabel(selectedService)}
                           </Badge>
                           <Button size="sm" variant="secondary" onClick={stopOneOnOneMeeting}>
                             <StopCircle className="h-4 w-4 mr-1" />
@@ -1932,8 +2101,7 @@ const TranscriptionRoom = ({ initialService }) => {
                         </div>
                         <div className="flex items-center gap-2">
                           <Badge variant="outline">
-                            {selectedService === 'deepgram' ? 'Deepgram' : 
-                             selectedService === 'openai' ? 'OpenAI' : 'Google Cloud'}
+                            {getServiceLabel(selectedService)}
                           </Badge>
                           {currentBlock.metadata?.speechRate && (
                             <Badge variant="secondary" className="text-xs">
@@ -1971,20 +2139,20 @@ const TranscriptionRoom = ({ initialService }) => {
                     </div>
                   )}
                   {/* Horizontal carousel for finalized blocks */}
-                  {transcriptBlocks.length > 0 && (
+                  {historyEntries.length > 0 && (
                     <div className="mb-4">
                       <div className="flex items-center justify-between mb-2">
                         <span className="text-sm text-muted-foreground">History</span>
                         <div className="flex gap-2">
-                          <Badge variant="secondary" className="text-xs">{(historyIdx ?? (transcriptBlocks.length-1)) + 1} / {transcriptBlocks.length}</Badge>
-                          <Button variant="secondary" size="sm" onClick={() => setHistoryIdx(idx => Math.max(0, (idx ?? transcriptBlocks.length-1) - 1))}>Prev</Button>
-                          <Button variant="secondary" size="sm" onClick={() => setHistoryIdx(idx => Math.min(transcriptBlocks.length - 1, (idx ?? transcriptBlocks.length-1) + 1))}>Next</Button>
+                          <Badge variant="secondary" className="text-xs">{(selectedHistoryOrdinal >= 0 ? selectedHistoryOrdinal + 1 : historyEntries.length)} / {historyEntries.length}</Badge>
+                          <Button variant="secondary" size="sm" disabled={selectedHistoryOrdinal <= 0} onClick={() => selectHistoryByOffset(-1)}>Prev</Button>
+                          <Button variant="secondary" size="sm" disabled={selectedHistoryOrdinal < 0 || selectedHistoryOrdinal >= historyEntries.length - 1} onClick={() => selectHistoryByOffset(1)}>Next</Button>
                         </div>
                       </div>
                       <Card
                         className={`relative group cursor-pointer transition-colors duration-500 ${historyStage==='new' ? 'border-green-400' : historyStage==='warn' ? 'border-yellow-400' : ''}`}
                         onClick={async () => {
-                          const text = transcriptBlocks[historyIdx ?? (transcriptBlocks.length-1)]?.text || '';
+                          const text = selectedHistoryBlock?.text || '';
                           try {
                             await navigator.clipboard.writeText(text);
                             setHistoryCopied(true);
@@ -1996,7 +2164,7 @@ const TranscriptionRoom = ({ initialService }) => {
                         <CardContent className="pt-6">
                           <ScrollArea className="max-h-60 md:max-h-72 no-scrollbar pr-2">
                             <p className="text-sm leading-relaxed whitespace-pre-wrap">
-                              {transcriptBlocks[historyIdx ?? (transcriptBlocks.length-1)]?.text}
+                              {selectedHistoryBlock?.text}
                             </p>
                           </ScrollArea>
                         </CardContent>
@@ -2169,10 +2337,17 @@ const TranscriptionRoom = ({ initialService }) => {
                     </div>
                   ) : (
                     (() => {
-                      const idx = historyIdx ?? (transcriptBlocks.length - 1);
-                      const block = transcriptBlocks[idx];
+                      const block = selectedHistoryBlock;
                       const ai = block?.ai;
                       const aiRag = block?.aiRag;
+
+                      if (!block) {
+                        return (
+                          <div className="text-center text-muted-foreground py-12">
+                            <p>Waiting for an active speaker turn.</p>
+                          </div>
+                        );
+                      }
                       
                       if (ai || aiRag) {
                         return (
@@ -2308,12 +2483,15 @@ const TranscriptionRoom = ({ initialService }) => {
       {/* ── Full-View Triple Panel Overlay ────────────────────────────────── */}
       {isFullView && (() => {
         // Resolve the block to display
-        const fvIdx = fullViewBlockIdx !== null
-          ? Math.max(0, Math.min(fullViewBlockIdx, transcriptBlocks.length - 1))
-          : transcriptBlocks.length - 1;
-        const fvBlock = transcriptBlocks[fvIdx];
-        const canPrev = fvIdx > 0;
-        const canNext = fvIdx < transcriptBlocks.length - 1;
+        const fvEntries = getFocusableHistoryEntries(transcriptBlocks);
+        const requestedFvIdx = fullViewBlockIdx !== null
+          ? fullViewBlockIdx
+          : resolveFocusableHistoryIndex(transcriptBlocks);
+        const fvIdx = resolveFocusableHistoryIndex(transcriptBlocks, requestedFvIdx);
+        const fvBlock = fvIdx !== null ? transcriptBlocks[fvIdx] : null;
+        const fvOrdinal = fvEntries.findIndex(({ index }) => index === fvIdx);
+        const canPrev = fvOrdinal > 0;
+        const canNext = fvOrdinal >= 0 && fvOrdinal < fvEntries.length - 1;
 
         // Per-block code deep dive and system design (matched by blockId)
         const fvBlockId = fvBlock?.id;
@@ -2352,7 +2530,9 @@ const TranscriptionRoom = ({ initialService }) => {
               {/* CENTER — Block navigation (takes all available space, centres itself) */}
               <div className="flex items-center justify-center gap-1.5 px-3">
                 <button
-                  onClick={() => setFullViewBlockIdx(Math.max(0, fvIdx - 1))}
+                  onClick={() => {
+                    if (canPrev) setFullViewBlockIdx(fvEntries[fvOrdinal - 1].index);
+                  }}
                   disabled={!canPrev}
                   className={cn(
                     'flex items-center gap-0.5 px-2 py-0.5 rounded text-[11px] border transition-all whitespace-nowrap',
@@ -2365,12 +2545,14 @@ const TranscriptionRoom = ({ initialService }) => {
 
                 <div className="flex items-center gap-1 px-2.5 py-0.5 bg-white/5 rounded border border-white/10 text-[11px] tabular-nums whitespace-nowrap">
                   <span className="text-white/30">Block</span>
-                  <span className="font-mono font-semibold text-white/80">{transcriptBlocks.length > 0 ? fvIdx + 1 : '—'}</span>
-                  <span className="text-white/20">/ {transcriptBlocks.length}</span>
+                  <span className="font-mono font-semibold text-white/80">{fvOrdinal >= 0 ? fvOrdinal + 1 : '—'}</span>
+                  <span className="text-white/20">/ {fvEntries.length}</span>
                 </div>
 
                 <button
-                  onClick={() => setFullViewBlockIdx(Math.min(transcriptBlocks.length - 1, fvIdx + 1))}
+                  onClick={() => {
+                    if (canNext) setFullViewBlockIdx(fvEntries[fvOrdinal + 1].index);
+                  }}
                   disabled={!canNext}
                   className={cn(
                     'flex items-center gap-0.5 px-2 py-0.5 rounded text-[11px] border transition-all whitespace-nowrap',
@@ -2382,7 +2564,9 @@ const TranscriptionRoom = ({ initialService }) => {
                 </button>
 
                 <button
-                  onClick={() => setFullViewBlockIdx(transcriptBlocks.length - 1)}
+                  onClick={() => {
+                    if (fvEntries.length > 0) setFullViewBlockIdx(fvEntries[fvEntries.length - 1].index);
+                  }}
                   disabled={!canNext}
                   className={cn(
                     'px-2 py-0.5 rounded text-[11px] border transition-all whitespace-nowrap',
