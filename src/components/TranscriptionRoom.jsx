@@ -331,6 +331,7 @@ const TranscriptionRoom = ({ initialService }) => {
   const [roomContext, setRoomContext] = useState(null);
   const [historyIdx, setHistoryIdx] = useState(null);
   const [historyStage, setHistoryStage] = useState('idle'); // 'new' | 'warn' | 'idle'
+  const isHistoryManuallySelectedRef = useRef(false);
   const [historyCopied, setHistoryCopied] = useState(false);
   const [debugMode, setDebugMode] = useState(false);
   const [isOverlayVisible, setIsOverlayVisible] = useState(true);
@@ -744,7 +745,7 @@ const TranscriptionRoom = ({ initialService }) => {
       // Append finalized turn to the visible transcript (with speaker metadata)
       setTranscriptBlocks(blocks => {
         const next = [...blocks, finalizedBlock];
-        if (shouldFocusTurn) {
+        if (shouldFocusTurn && !isHistoryManuallySelectedRef.current) {
           setHistoryIdx(next.length - 1);
           setHistoryStage('new');
           setTimeout(() => setHistoryStage('warn'), 1500);
@@ -1091,6 +1092,7 @@ const TranscriptionRoom = ({ initialService }) => {
   };
 
   const beginTranscriptionSession = () => {
+    isHistoryManuallySelectedRef.current = false;
     setIsProviderLocked(true);
     setCurrentStep('transcribing');
     sessionStartRef.current = Date.now();
@@ -1109,6 +1111,7 @@ const TranscriptionRoom = ({ initialService }) => {
   };
 
   const resetTranscriptionSession = () => {
+    isHistoryManuallySelectedRef.current = false;
     setIsAiThinking(false);
     setCurrentSegment({
       text: '',
@@ -1403,6 +1406,7 @@ const TranscriptionRoom = ({ initialService }) => {
     try {
       // Start session timer if not already running
       if (!sessionStartRef.current) {
+        isHistoryManuallySelectedRef.current = false;
         sessionStartRef.current = Date.now();
         if (sessionTimerRef.current) clearInterval(sessionTimerRef.current);
         sessionTimerRef.current = setInterval(() => {
@@ -1823,6 +1827,7 @@ const TranscriptionRoom = ({ initialService }) => {
   const selectHistoryByOffset = useCallback((offset) => {
     const entries = getFocusableHistoryEntries(transcriptBlocks);
     if (entries.length === 0) return;
+    isHistoryManuallySelectedRef.current = true;
 
     const requestedIndex = isFullView && fullViewBlockIdx !== null ? fullViewBlockIdx : historyIdx;
     const resolvedIdx = resolveFocusableHistoryIndex(transcriptBlocks, requestedIndex);
