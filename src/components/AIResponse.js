@@ -100,22 +100,35 @@ function splitSegments(text) {
 
 // Render a document-enhanced (RAG) response: code blocks get the syntax-
 // highlighted CodeBlock, prose keeps the [DOC] RAG highlighting.
-function renderDocEnhancedText(text, ragSources) {
+function renderDocEnhancedText(text, ragSources, readerMode = false) {
   if (!text) return null;
   return splitSegments(text).map((seg, idx) => {
     if (seg.type === 'code') {
       return <CodeBlock key={idx} code={seg.content} language={seg.language} />;
     }
     if (!seg.content.trim()) return null;
-    return <RAGHighlightedText key={idx} text={seg.content} ragSources={ragSources || []} />;
+    return (
+      <RAGHighlightedText
+        key={idx}
+        text={seg.content}
+        ragSources={ragSources || []}
+        className={readerMode ? 'rag-highlighted-content-reader' : ''}
+      />
+    );
   });
 }
 
 // Parse a mixed text+code response into renderable segments
-function renderResponseText(text) {
+function renderResponseText(text, readerMode = false) {
   if (!text) return null;
 
   const segments = splitSegments(text);
+  const proseClassName = readerMode
+    ? 'text-lg lg:text-xl leading-8 lg:leading-9'
+    : 'text-sm leading-relaxed';
+  const sectionClassName = readerMode
+    ? 'text-lg lg:text-xl font-semibold mt-4 mb-2'
+    : 'text-sm font-semibold mt-3 mb-1';
 
   return segments.map((seg, idx) => {
     if (seg.type === 'code') {
@@ -131,21 +144,21 @@ function renderResponseText(text) {
             return (
               <div key={li} className="flex items-start gap-2 ml-2">
                 <span className="text-muted-foreground mt-0.5 select-none">•</span>
-                <span className="text-sm leading-relaxed">{trimmed.replace(/^[-•]\s+|^\d+\.\s+/, '')}</span>
+                <span className={proseClassName}>{trimmed.replace(/^[-•]\s+|^\d+\.\s+/, '')}</span>
               </div>
             );
           }
           if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
-            return <p key={li} className="text-sm font-semibold mt-3 mb-1">{trimmed.replace(/\*\*/g, '')}</p>;
+            return <p key={li} className={sectionClassName}>{trimmed.replace(/\*\*/g, '')}</p>;
           }
-          return <p key={li} className="text-sm leading-relaxed">{trimmed}</p>;
+          return <p key={li} className={proseClassName}>{trimmed}</p>;
         })}
       </div>
     );
   });
 }
 
-function AIResponse({ response }) {
+function AIResponse({ response, readerMode = false }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {
@@ -232,18 +245,18 @@ function AIResponse({ response }) {
       <CardContent>
         {response.isFormatted ? (
           <div 
-            className="ai-response-content"
+            className={cn('ai-response-content', readerMode && 'ai-response-content-reader')}
             dangerouslySetInnerHTML={{ __html: response.text }}
           />
         ) : (
           <div className="space-y-3">
             {isDocumentEnhanced && response.ragUsed ? (
-              <div className="space-y-2 text-sm leading-relaxed">
-                {renderDocEnhancedText(response.text, response.ragSources)}
+              <div className={cn('space-y-2', readerMode ? 'text-lg lg:text-xl leading-8 lg:leading-9' : 'text-sm leading-relaxed')}>
+                {renderDocEnhancedText(response.text, response.ragSources, readerMode)}
               </div>
             ) : (
               <div className="space-y-2">
-                {renderResponseText(response.text)}
+                {renderResponseText(response.text, readerMode)}
               </div>
             )}
           </div>
@@ -284,4 +297,4 @@ function AIResponse({ response }) {
   );
 }
 
-export default AIResponse; 
+export default AIResponse;

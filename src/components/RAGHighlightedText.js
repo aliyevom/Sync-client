@@ -7,7 +7,7 @@ import './RAGHighlightedText.css';
  * Parses [RAG_START] and [RAG_END] tags and highlights RAG-sourced content
  * with a simple blue inline tag style.
  */
-const RAGHighlightedText = ({ text, ragSources = [] }) => {
+const RAGHighlightedText = ({ text, ragSources = [], className = '' }) => {
   if (!text) return null;
 
   // Parse text and extract RAG-tagged sections
@@ -60,7 +60,7 @@ const RAGHighlightedText = ({ text, ragSources = [] }) => {
     : 'GCS documents';
 
   return (
-    <p className="rag-highlighted-content">
+    <p className={['rag-highlighted-content', className].filter(Boolean).join(' ')}>
       {parts.map((part, index) => {
         if (part.type === 'rag') {
           return (

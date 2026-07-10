@@ -128,6 +128,18 @@
   line-height: 1.6;
 }
 
+.ai-response-content.ai-response-content-reader {
+  font-size: 1.125rem;
+  line-height: 1.85;
+}
+
+@media (min-width: 1024px) {
+  .ai-response-content.ai-response-content-reader {
+    font-size: 1.25rem;
+    line-height: 1.8;
+  }
+}
+
 .ai-response-content .ai-analysis {
   display: flex;
   flex-direction: column;

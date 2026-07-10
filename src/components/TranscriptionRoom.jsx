@@ -21,6 +21,7 @@ import {
   Activity,
   Columns3,
   ArrowLeft,
+  BookOpen,
   Terminal,
   Network,
   Users,
@@ -142,6 +143,13 @@ const resolveFocusableHistoryIndex = (blocks, requestedIndex = null) => {
   return entries[entries.length - 1].index;
 };
 
+const isEditableShortcutTarget = (target) => {
+  if (!target || !(target instanceof Element)) return false;
+  const tag = target.tagName?.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return true;
+  return Boolean(target.isContentEditable || target.closest('[contenteditable="true"], [role="textbox"], [role="combobox"]'));
+};
+
 const TranscriptionRoom = ({ initialService }) => {
   const defaultService = initialService || DEFAULT_TRANSCRIPTION_SERVICE;
   const [isRecording, setIsRecording] = useState(false);
@@ -176,6 +184,13 @@ const TranscriptionRoom = ({ initialService }) => {
   });
   const [isProviderLocked, setIsProviderLocked] = useState(false);
   const [isAutoScrollEnabled, setIsAutoScrollEnabled] = useState(true);
+  const [isReaderMode, setIsReaderMode] = useState(() => {
+    try {
+      return localStorage.getItem('ai_reader_mode') === 'true';
+    } catch {
+      return false;
+    }
+  });
   const [isAiAnalysisEnabled, setIsAiAnalysisEnabled] = useState(() => {
     // Try to load from localStorage, default to true (enabled)
     try {
@@ -255,6 +270,14 @@ const TranscriptionRoom = ({ initialService }) => {
       console.warn('Failed to save AI Analysis enabled preference:', err);
     }
   }, [isAiAnalysisEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ai_reader_mode', isReaderMode ? 'true' : 'false');
+    } catch (err) {
+      console.warn('Failed to save AI Reader Mode preference:', err);
+    }
+  }, [isReaderMode]);
 
   useEffect(() => {
     try {
@@ -1797,13 +1820,35 @@ const TranscriptionRoom = ({ initialService }) => {
   const selectedHistoryIdx = resolveFocusableHistoryIndex(transcriptBlocks, historyIdx);
   const selectedHistoryOrdinal = historyEntries.findIndex(({ index }) => index === selectedHistoryIdx);
   const selectedHistoryBlock = selectedHistoryIdx !== null ? transcriptBlocks[selectedHistoryIdx] : null;
-  const selectHistoryByOffset = (offset) => {
-    if (historyEntries.length === 0) return;
-    const currentOrdinal = selectedHistoryOrdinal >= 0 ? selectedHistoryOrdinal : historyEntries.length - 1;
-    const nextOrdinal = Math.max(0, Math.min(historyEntries.length - 1, currentOrdinal + offset));
-    setHistoryIdx(historyEntries[nextOrdinal].index);
+  const selectHistoryByOffset = useCallback((offset) => {
+    const entries = getFocusableHistoryEntries(transcriptBlocks);
+    if (entries.length === 0) return;
+
+    const requestedIndex = isFullView && fullViewBlockIdx !== null ? fullViewBlockIdx : historyIdx;
+    const resolvedIdx = resolveFocusableHistoryIndex(transcriptBlocks, requestedIndex);
+    const currentOrdinal = entries.findIndex(({ index }) => index === resolvedIdx);
+    const safeOrdinal = currentOrdinal >= 0 ? currentOrdinal : entries.length - 1;
+    const nextOrdinal = Math.max(0, Math.min(entries.length - 1, safeOrdinal + offset));
+    const nextIndex = entries[nextOrdinal].index;
+
+    setHistoryIdx(nextIndex);
+    if (isFullView) setFullViewBlockIdx(nextIndex);
     setHistoryStage('idle');
-  };
+  }, [fullViewBlockIdx, historyIdx, isFullView, transcriptBlocks]);
+
+  useEffect(() => {
+    const handleHistoryShortcut = (event) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (isEditableShortcutTarget(event.target)) return;
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+
+      event.preventDefault();
+      selectHistoryByOffset(event.key === 'ArrowLeft' ? -1 : 1);
+    };
+
+    window.addEventListener('keydown', handleHistoryShortcut);
+    return () => window.removeEventListener('keydown', handleHistoryShortcut);
+  }, [selectHistoryByOffset]);
 
   return (
     <div className="min-h-screen bg-background p-4 lg:p-6">
@@ -2263,6 +2308,20 @@ const TranscriptionRoom = ({ initialService }) => {
                     AI Analysis
                   </button>
 
+                  {/* Reader Mode toggle pill */}
+                  <button
+                    onClick={() => setIsReaderMode(v => !v)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all',
+                      isReaderMode
+                        ? 'bg-amber-950/60 border-amber-500/50 text-amber-300'
+                        : 'border-white/10 text-white/30 hover:text-amber-300 hover:border-amber-500/40'
+                    )}
+                  >
+                    <BookOpen className="h-3 w-3" />
+                    Reader
+                  </button>
+
                   {/* Type select — only when AI enabled */}
                   {isAiAnalysisEnabled && (
                     <select
@@ -2352,8 +2411,8 @@ const TranscriptionRoom = ({ initialService }) => {
                       if (ai || aiRag) {
                         return (
                           <div className="space-y-4 min-w-0">
-                            {ai && <AIResponse response={ai} />}
-                            {aiRag && ragAuthenticated && <AIResponse response={aiRag} />}
+                            {ai && <AIResponse response={ai} readerMode={isReaderMode} />}
+                            {aiRag && ragAuthenticated && <AIResponse response={aiRag} readerMode={isReaderMode} />}
                           </div>
                         );
                       }
@@ -2372,7 +2431,7 @@ const TranscriptionRoom = ({ initialService }) => {
                                 return true;
                               })
                               .map((response, index) => (
-                                <AIResponse key={index} response={response} />
+                                <AIResponse key={index} response={response} readerMode={isReaderMode} />
                               ))}
                           </div>
                         )
@@ -2635,8 +2694,8 @@ const TranscriptionRoom = ({ initialService }) => {
                   <div className="p-4 space-y-3" style={{ minWidth: 0 }}>
                     {fvAi || fvAiRag ? (
                       <>
-                        {fvAi && <AIResponse response={fvAi} />}
-                        {fvAiRag && ragAuthenticated && <AIResponse response={fvAiRag} />}
+                        {fvAi && <AIResponse response={fvAi} readerMode={isReaderMode} />}
+                        {fvAiRag && ragAuthenticated && <AIResponse response={fvAiRag} readerMode={isReaderMode} />}
                       </>
                     ) : (
                       <div className="text-center text-muted-foreground py-16 text-sm">
