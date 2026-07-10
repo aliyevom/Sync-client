@@ -31,8 +31,8 @@
     "web-vitals": "^2.1.4"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
+    "start": "NODE_OPTIONS=--experimental-global-webcrypto react-scripts start",
+    "build": "NODE_OPTIONS=--experimental-global-webcrypto react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },

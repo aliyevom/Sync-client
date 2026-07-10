@@ -14,9 +14,9 @@ import {
   RefreshCw,
   CheckCircle,
   XCircle,
-  AlertCircle,
   Mic,
-  Monitor
+  Monitor,
+  Fingerprint
 } from 'lucide-react';
 
 const MEETING_MODES = [
@@ -382,6 +382,27 @@ function Settings({
                       <p className="text-sm font-medium">Google Cloud</p>
                       <p className="text-xs text-muted-foreground mt-1">
                         Unavailable
+                      </p>
+                    </button>
+
+                    <button
+                      className={`
+                        relative p-6 rounded-lg border-2 transition-all
+                        ${selectedService === 'speechmatics' 
+                          ? 'border-primary bg-primary/10' 
+                          : 'border-border hover:border-primary/50'}
+                        ${currentStep === 'transcribing' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                      `}
+                      onClick={() => handleServiceSelect('speechmatics')}
+                      disabled={currentStep === 'transcribing'}
+                    >
+                      <Badge className="absolute top-2 right-2" variant="secondary">Known speaker</Badge>
+                      <div className="w-full h-20 mb-2 flex items-center justify-center">
+                        <Fingerprint className="h-12 w-12 text-fuchsia-300" />
+                      </div>
+                      <p className="text-sm font-medium">Speechmatics</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Realtime • Speaker ID • Default
                       </p>
                     </button>
 
