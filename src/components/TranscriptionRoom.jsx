@@ -1845,10 +1845,28 @@ const TranscriptionRoom = ({ initialService }) => {
     const handleHistoryShortcut = (event) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (isEditableShortcutTarget(event.target)) return;
-      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+
+      const shortcutOffsets = {
+        ArrowLeft: -1,
+        ArrowUp: -1,
+        PageUp: -1,
+        ArrowRight: 1,
+        ArrowDown: 1,
+        PageDown: 1
+      };
+      const legacyShortcutOffsets = {
+        33: -1, // PageUp
+        37: -1, // ArrowLeft
+        38: -1, // ArrowUp
+        34: 1, // PageDown
+        39: 1, // ArrowRight
+        40: 1 // ArrowDown
+      };
+      const offset = shortcutOffsets[event.key] ?? shortcutOffsets[event.code] ?? legacyShortcutOffsets[event.keyCode];
+      if (!offset) return;
 
       event.preventDefault();
-      selectHistoryByOffset(event.key === 'ArrowLeft' ? -1 : 1);
+      selectHistoryByOffset(offset);
     };
 
     window.addEventListener('keydown', handleHistoryShortcut);
