@@ -98,6 +98,21 @@ function splitSegments(text) {
   return segments;
 }
 
+const SPEECH_CUES = ['Say', 'Why', 'Proof'];
+
+function speechCueLabel(line) {
+  const label = line.replace(/\*\*/g, '').replace(/:$/, '').trim();
+  return SPEECH_CUES.includes(label) ? label : null;
+}
+
+function SpeechCue({ label }) {
+  return (
+    <p className="text-xs font-bold uppercase tracking-widest text-muted-foreground select-none mt-3 mb-1">
+      {label}
+    </p>
+  );
+}
+
 // Render a document-enhanced (RAG) response: code blocks get the syntax-
 // highlighted CodeBlock, prose keeps the [DOC] RAG highlighting.
 function renderDocEnhancedText(text, ragSources, readerMode = false) {
@@ -108,12 +123,22 @@ function renderDocEnhancedText(text, ragSources, readerMode = false) {
     }
     if (!seg.content.trim()) return null;
     return (
-      <RAGHighlightedText
-        key={idx}
-        text={seg.content}
-        ragSources={ragSources || []}
-        className={readerMode ? 'rag-highlighted-content-reader' : ''}
-      />
+      <div key={idx} className="space-y-2">
+        {seg.content.split('\n').map((line, li) => {
+          const trimmed = line.trim();
+          if (!trimmed) return null;
+          const cue = speechCueLabel(trimmed);
+          if (cue) return <SpeechCue key={li} label={cue} />;
+          return (
+            <RAGHighlightedText
+              key={li}
+              text={trimmed}
+              ragSources={ragSources || []}
+              className={readerMode ? 'rag-highlighted-content-reader' : ''}
+            />
+          );
+        })}
+      </div>
     );
   });
 }
@@ -149,6 +174,8 @@ function renderResponseText(text, readerMode = false) {
             );
           }
           if (trimmed.startsWith('**') && trimmed.endsWith('**')) {
+            const cue = speechCueLabel(trimmed);
+            if (cue) return <SpeechCue key={li} label={cue} />;
             return <p key={li} className={sectionClassName}>{trimmed.replace(/\*\*/g, '')}</p>;
           }
           return <p key={li} className={proseClassName}>{trimmed}</p>;
@@ -164,9 +191,12 @@ function AIResponse({ response, readerMode = false }) {
   const handleCopy = async () => {
     try {
       // Extract text content from HTML if formatted
-      const textContent = response.isFormatted 
-        ? response.text.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim()
-        : response.text;
+      const textContent = (response.isFormatted
+        ? response.text.replace(/<[^>]*>/g, '')
+        : response.text)
+        .replace(/^\s*\*{0,2}(Say|Why|Proof)\*{0,2}\s*$/gmi, '')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
       
       await navigator.clipboard.writeText(textContent);
       setCopied(true);
