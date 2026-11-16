@@ -251,6 +251,9 @@ function Settings({
     } else {
       console.warn(`[X] [CLIENT] Cannot select bucket: socket=${!!socket}, roomId=${currentRoomId}`);
     }
+    if (bucket === 'c1') {
+      handleProfileSelect('c1');
+    }
   };
 
   const handleServiceSelect = (service) => {
@@ -678,6 +681,10 @@ function Settings({
                                 <span className="text-sm text-muted-foreground">Bucket U-2</span>
                                 <span className="text-sm font-mono">{documentHealth.gcs.buckets?.u2}</span>
                               </div>
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm text-muted-foreground">Bucket C1</span>
+                                <span className="text-sm font-mono">{documentHealth.gcs.buckets?.c1}</span>
+                              </div>
                             </>
                           )}
                         </div>
@@ -700,7 +707,7 @@ function Settings({
                             className="flex flex-col items-center gap-1 h-auto py-3"
                           >
                             <span className="font-medium">All</span>
-                            <span className="text-xs opacity-80">N-1 + U-1 + U-2</span>
+                            <span className="text-xs opacity-80">N-1 + U-1 + U-2 + C1</span>
                           </Button>
                           <Button
                             variant={selectedBucket === 'n1' ? "default" : "outline"}
@@ -729,10 +736,19 @@ function Settings({
                             <span className="font-medium">U-2 Only</span>
                             <span className="text-xs opacity-80">Bucket U-2</span>
                           </Button>
+                          <Button
+                            variant={selectedBucket === 'c1' ? "default" : "outline"}
+                            size="sm"
+                            onClick={() => handleBucketSelect('c1')}
+                            className="flex flex-col items-center gap-1 h-auto py-3"
+                          >
+                            <span className="font-medium">C1</span>
+                            <span className="text-xs opacity-80">Interview pack</span>
+                          </Button>
                         </div>
                         {selectedBucket !== null && (
                           <p className="text-xs text-muted-foreground mt-2">
-                            Currently searching: <strong>{selectedBucket === 'n1' ? 'Bucket N-1' : selectedBucket === 'u1' ? 'Bucket U-1' : selectedBucket === 'u2' ? 'Bucket U-2' : 'All Buckets'}</strong>
+                            Currently searching: <strong>{selectedBucket === 'n1' ? 'Bucket N-1' : selectedBucket === 'u1' ? 'Bucket U-1' : selectedBucket === 'u2' ? 'Bucket U-2' : selectedBucket === 'c1' ? 'Bucket C1' : 'All Buckets'}</strong>
                           </p>
                         )}
                       </div>

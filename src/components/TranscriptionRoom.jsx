@@ -695,10 +695,10 @@ const TranscriptionRoom = ({ initialService }) => {
           useRAG: Boolean(useRAGRef.current),
         });
         if (isCodeDeepDiveEnabledRef.current) {
-          socketRef.current.emit('process_code_deep_dive', { text: block.text, roomId: currentRoomId, blockId: block.turnId });
+          socketRef.current.emit('process_code_deep_dive', { text: block.text, roomId: currentRoomId, blockId: block.turnId, useRAG: Boolean(useRAGRef.current) });
         }
         if (isSystemDesignEnabledRef.current) {
-          socketRef.current.emit('process_system_design', { text: block.text, roomId: currentRoomId, blockId: block.turnId, recentBlocks: transcriptsByRoomClientRef.current || [] });
+          socketRef.current.emit('process_system_design', { text: block.text, roomId: currentRoomId, blockId: block.turnId, recentBlocks: transcriptsByRoomClientRef.current || [], useRAG: Boolean(useRAGRef.current) });
         }
       } catch (err) {
         console.error('[X] [CLIENT] Error emitting process_with_ai:', err);
